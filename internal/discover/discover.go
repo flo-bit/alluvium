@@ -121,7 +121,10 @@ func (c *Config) collections(ctx context.Context) ([]string, error) {
 			}
 		}
 		if n == 0 {
-			return nil, fmt.Errorf("discover: status page %s listed no collections; its layout may have changed", u)
+			// A fresh instance lists nothing yet; a layout change would
+			// also look like this, so say so.
+			c.Logger.Warn("status page listed no collections", "source", u)
+			continue
 		}
 		c.Logger.Info("read collections", "source", u, "kept", n)
 	}
@@ -346,7 +349,7 @@ func Run(ctx context.Context, c Config) error {
 		return err
 	}
 	if len(nsids) == 0 {
-		return errors.New("discover: no collections to enumerate")
+		return errors.New("discover: no collections to enumerate; if the status pages are reachable, their layout may have changed")
 	}
 	c.Logger.Info("collections to enumerate", "count", len(nsids))
 
