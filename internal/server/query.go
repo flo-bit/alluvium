@@ -19,6 +19,11 @@ const (
 const (
 	maxBacklinkSpecs = 10
 	maxHydratePaths  = 5
+	maxFieldFilters  = 8
+	// scanChunk is how many candidates a filtered query reads at a time and
+	// scanBudget how many it examines in total before returning a cursor.
+	scanChunk  = 500
+	scanBudget = 50_000
 )
 
 // Record is one record as the query API returns it.
@@ -273,21 +278,24 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "InvalidRequest", problem)
 		return
 	}
-	// Any other parameter filters on that field. Only reference fields
-	// (AT URIs and DIDs) can be filtered so far; they use the backlink index.
+	// Any other parameter filters on that field. One reference filter (an
+	// AT URI or DID) drives the query through the backlink index; the rest
+	// are checked against each candidate record.
+	var filters []fieldFilter
 	for name, values := range q {
 		if reservedParams[name] {
 			continue
 		}
-		if opts.LinkTarget != "" || len(values) != 1 {
-			writeError(w, http.StatusBadRequest, "InvalidRequest", "only one field filter is supported so far")
+		if len(values) != 1 || len(filters) >= maxFieldFilters {
+			writeError(w, http.StatusBadRequest, "InvalidRequest", "at most 8 field filters, one value each")
 			return
 		}
-		if !strings.HasPrefix(values[0], "at://") && !strings.HasPrefix(values[0], "did:") {
-			writeError(w, http.StatusBadRequest, "InvalidRequest", "field filters only accept an AT URI or DID so far: "+name)
-			return
+		f := parseFieldFilter(name, values[0])
+		if f.isLink() && opts.LinkTarget == "" {
+			opts.LinkPath, opts.LinkTarget = name, values[0]
+			continue
 		}
-		opts.LinkPath, opts.LinkTarget = name, values[0]
+		filters = append(filters, f)
 	}
 	if cursor := q.Get("cursor"); cursor != "" {
 		pos, ok := decodePosition(cursor)
@@ -300,31 +308,60 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 
 	view := s.Store.NewView()
 	defer func() { _ = view.Close() }()
-	rows, more, err := view.List(opts)
-	if err != nil {
-		s.Logger.Error("listRecords", "err", err)
-		writeError(w, http.StatusInternalServerError, "InternalError", "query failed")
-		return
-	}
+
+	// Candidates come from the index in time order and are filtered here.
+	// A request examines at most scanBudget candidates; when that runs out
+	// the cursor lets the caller continue, possibly from a short page.
 	out := struct {
 		Records []Record `json:"records"`
 		Cursor  string   `json:"cursor,omitempty"`
-	}{Records: make([]Record, 0, len(rows))}
-	for i := range rows {
-		rec, err := renderRecord(&rows[i])
+	}{Records: make([]Record, 0, opts.Limit)}
+	want, examined := opts.Limit, 0
+	scan := opts
+	if len(filters) > 0 {
+		scan.Limit = scanChunk
+	}
+	var last *store.Row
+	more := true
+	for more && len(out.Records) < want && examined < scanBudget {
+		rows, next, err := view.List(scan)
 		if err != nil {
-			s.Logger.Error("listRecords: stored line unreadable", "err", err)
-			continue
-		}
-		if err := decorate(view, &rec, extra); err != nil {
 			s.Logger.Error("listRecords", "err", err)
 			writeError(w, http.StatusInternalServerError, "InternalError", "query failed")
 			return
 		}
-		out.Records = append(out.Records, rec)
+		more = next
+		for i := range rows {
+			examined++
+			last = &rows[i]
+			rec, err := renderRecord(&rows[i])
+			if err != nil {
+				s.Logger.Error("listRecords: stored line unreadable", "err", err)
+				continue
+			}
+			if !matchAll(filters, rec.Value) {
+				continue
+			}
+			if err := decorate(view, &rec, extra); err != nil {
+				s.Logger.Error("listRecords", "err", err)
+				writeError(w, http.StatusInternalServerError, "InternalError", "query failed")
+				return
+			}
+			out.Records = append(out.Records, rec)
+			if len(out.Records) == want {
+				// Rows after this one in the chunk were not examined.
+				more = more || i < len(rows)-1
+				break
+			}
+		}
+		if last != nil {
+			scan.After = &store.Position{SortTime: last.SortTime, DID: last.DID, Rkey: last.Rkey}
+		}
+		if len(rows) == 0 {
+			break
+		}
 	}
-	if more && len(rows) > 0 {
-		last := rows[len(rows)-1]
+	if more && last != nil {
 		out.Cursor = encodePosition(store.Position{SortTime: last.SortTime, DID: last.DID, Rkey: last.Rkey})
 	}
 	writeJSON(w, http.StatusOK, out)
