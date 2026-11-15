@@ -48,12 +48,12 @@ func TestFoldAndExport(t *testing.T) {
 	s := open(t)
 
 	b := s.NewBatch()
-	must(t, b.Put("a.b.one", "did:plc:alice", "1", []byte(`{"v":1}`)))
-	must(t, b.Put("a.b.one", "did:plc:alice", "2", []byte(`{"v":2}`)))
-	must(t, b.Put("a.b.one", "did:plc:bob", "1", []byte(`{"v":3}`)))
-	must(t, b.Put("a.b.two", "did:plc:alice", "1", []byte(`{"v":4}`)))
+	must(t, b.Put("a.b.one", "did:plc:alice", "1", []byte(`{"v":1}`), 1000))
+	must(t, b.Put("a.b.one", "did:plc:alice", "2", []byte(`{"v":2}`), 1000))
+	must(t, b.Put("a.b.one", "did:plc:bob", "1", []byte(`{"v":3}`), 1000))
+	must(t, b.Put("a.b.two", "did:plc:alice", "1", []byte(`{"v":4}`), 1000))
 	// A collection that shares a prefix must not leak into a.b.one.
-	must(t, b.Put("a.b.onemore", "did:plc:alice", "1", []byte(`{"v":5}`)))
+	must(t, b.Put("a.b.onemore", "did:plc:alice", "1", []byte(`{"v":5}`), 1000))
 	must(t, b.Commit(10, 1000))
 	must(t, b.Close())
 
@@ -73,8 +73,8 @@ func TestFoldAndExport(t *testing.T) {
 
 	// Replays are idempotent: an update and a repeated put do not recount.
 	b = s.NewBatch()
-	must(t, b.Put("a.b.one", "did:plc:alice", "1", []byte(`{"v":"updated"}`)))
-	must(t, b.Put("a.b.one", "did:plc:alice", "1", []byte(`{"v":"updated"}`)))
+	must(t, b.Put("a.b.one", "did:plc:alice", "1", []byte(`{"v":"updated"}`), 1000))
+	must(t, b.Put("a.b.one", "did:plc:alice", "1", []byte(`{"v":"updated"}`), 1000))
 	must(t, b.Delete("a.b.one", "did:plc:alice", "2"))
 	must(t, b.Delete("a.b.one", "did:plc:alice", "2"))
 	must(t, b.Delete("a.b.one", "did:plc:nobody", "9"))
@@ -96,11 +96,11 @@ func TestPurgeAndInactive(t *testing.T) {
 	must(t, err)
 
 	b := s.NewBatch()
-	must(t, b.Put("a.b.one", "did:plc:alice", "1", []byte(`{}`)))
-	must(t, b.Put("a.b.two", "did:plc:alice", "1", []byte(`{}`)))
-	must(t, b.Put("a.b.one", "did:plc:bob", "1", []byte(`{}`)))
+	must(t, b.Put("a.b.one", "did:plc:alice", "1", []byte(`{}`), 1000))
+	must(t, b.Put("a.b.two", "did:plc:alice", "1", []byte(`{}`), 1000))
+	must(t, b.Put("a.b.one", "did:plc:bob", "1", []byte(`{}`), 1000))
 	// A purge sees writes made earlier in the same batch.
-	must(t, b.Put("a.b.one", "did:plc:carol", "1", []byte(`{}`)))
+	must(t, b.Put("a.b.one", "did:plc:carol", "1", []byte(`{}`), 1000))
 	must(t, b.PurgeDID("did:plc:carol"))
 	must(t, b.Commit(1, 1))
 	must(t, b.Close())
@@ -157,7 +157,7 @@ func TestReadBackFromDisk(t *testing.T) {
 	line := []byte(`{"did":"did:plc:alice","kind":"commit","commit":{"operation":"create","collection":"a.b.one","record":{"text":"the same words again and again and again"}}}`)
 	b := s.NewBatch()
 	for i := range 20000 {
-		must(t, b.Put("a.b.one", "did:plc:alice", fmt.Sprintf("%06d", i), line))
+		must(t, b.Put("a.b.one", "did:plc:alice", fmt.Sprintf("%06d", i), line, 1000))
 	}
 	must(t, b.Commit(1, 1))
 	must(t, b.Close())
@@ -170,5 +170,104 @@ func TestReadBackFromDisk(t *testing.T) {
 	lines, _, _ := export(t, s, "a.b.one", "")
 	if len(lines) != 20000 || lines[19999] != string(line) {
 		t.Fatalf("read back %d lines", len(lines))
+	}
+}
+
+func TestSortTime(t *testing.T) {
+	const witnessed = int64(1794705518038027)
+	// 3mmzl6mw4hm25 encodes a time in May 2026, before witnessed.
+	got := SortTime("3mmzl6mw4hm25", witnessed)
+	if got == uint64(witnessed) || got < 1_770_000_000_000_000 || got > uint64(witnessed) {
+		t.Fatalf("TID sort time = %d", got)
+	}
+	for _, rkey := range []string{"self", "3mmzl6mw4hm2", "3mmzl6mw4hm2!", "zzzzzzzzzzzzz", "7777777777777"} {
+		if got := SortTime(rkey, witnessed); got != uint64(witnessed) {
+			t.Fatalf("SortTime(%q) = %d, want the witnessed time", rkey, got)
+		}
+	}
+}
+
+func rkeys(rows []Row) string {
+	out := ""
+	for _, r := range rows {
+		out += r.DID[len("did:plc:"):] + "/" + r.Rkey + " "
+	}
+	return out
+}
+
+func TestListAndGet(t *testing.T) {
+	s := open(t)
+	b := s.NewBatch()
+	// Non-TID keys sort by witnessed time, which makes the order explicit.
+	must(t, b.Put("a.b.one", "did:plc:alice", "k1", []byte(`1`), 100))
+	must(t, b.Put("a.b.one", "did:plc:bob", "k2", []byte(`2`), 200))
+	must(t, b.Put("a.b.one", "did:plc:alice", "k3", []byte(`3`), 300))
+	must(t, b.Put("a.b.one", "did:plc:carol", "k4", []byte(`4`), 300))
+	must(t, b.Put("a.b.one", "did:plc:alice", "k5", []byte(`5`), 500))
+	must(t, b.Put("a.b.onemore", "did:plc:alice", "x", []byte(`x`), 999))
+	must(t, b.Commit(1, 1))
+	must(t, b.Close())
+
+	v := s.NewView()
+	defer func() { _ = v.Close() }()
+
+	rows, more, err := v.List(ListOptions{Collection: "a.b.one", Limit: 2})
+	must(t, err)
+	if got := rkeys(rows); got != "alice/k5 carol/k4 " || !more {
+		t.Fatalf("newest first page 1: %q more=%v", got, more)
+	}
+	last := rows[1]
+	rows, more, err = v.List(ListOptions{Collection: "a.b.one", Limit: 10, After: &Position{last.SortTime, last.DID, last.Rkey}})
+	must(t, err)
+	if got := rkeys(rows); got != "alice/k3 bob/k2 alice/k1 " || more {
+		t.Fatalf("newest first page 2: %q more=%v", got, more)
+	}
+
+	rows, _, err = v.List(ListOptions{Collection: "a.b.one", Limit: 10, Ascending: true})
+	must(t, err)
+	if got := rkeys(rows); got != "alice/k1 bob/k2 alice/k3 carol/k4 alice/k5 " {
+		t.Fatalf("oldest first: %q", got)
+	}
+
+	rows, more, err = v.List(ListOptions{Collection: "a.b.one", DID: "did:plc:alice", Limit: 2})
+	must(t, err)
+	if got := rkeys(rows); got != "alice/k5 alice/k3 " || !more {
+		t.Fatalf("actor page 1: %q more=%v", got, more)
+	}
+	last = rows[1]
+	rows, more, err = v.List(ListOptions{Collection: "a.b.one", DID: "did:plc:alice", Limit: 2, After: &Position{last.SortTime, last.DID, last.Rkey}})
+	must(t, err)
+	if got := rkeys(rows); got != "alice/k1 " || more {
+		t.Fatalf("actor page 2: %q more=%v", got, more)
+	}
+
+	row, err := v.Get("a.b.one", "did:plc:bob", "k2")
+	must(t, err)
+	if row == nil || string(row.Line) != "2" || row.SortTime != 200 {
+		t.Fatalf("get: %+v", row)
+	}
+	if row, err := v.Get("a.b.one", "did:plc:bob", "missing"); err != nil || row != nil {
+		t.Fatalf("get missing: %+v %v", row, err)
+	}
+
+	// An update re-sorts a non-TID record; a delete removes it from the order.
+	b = s.NewBatch()
+	must(t, b.Put("a.b.one", "did:plc:alice", "k1", []byte(`1b`), 900))
+	must(t, b.Delete("a.b.one", "did:plc:carol", "k4"))
+	must(t, b.PurgeDID("did:plc:bob"))
+	must(t, b.Commit(2, 2))
+	must(t, b.Close())
+	v2 := s.NewView()
+	defer func() { _ = v2.Close() }()
+	rows, _, err = v2.List(ListOptions{Collection: "a.b.one", Limit: 10})
+	must(t, err)
+	if got := rkeys(rows); got != "alice/k1 alice/k5 alice/k3 " {
+		t.Fatalf("after update/delete/purge: %q", got)
+	}
+	// The earlier view is unaffected.
+	rows, _, err = v.List(ListOptions{Collection: "a.b.one", Limit: 10})
+	must(t, err)
+	if len(rows) != 5 {
+		t.Fatalf("snapshot saw later writes: %q", rkeys(rows))
 	}
 }

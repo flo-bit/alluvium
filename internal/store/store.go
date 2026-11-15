@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/cockroachdb/pebble"
@@ -17,7 +18,8 @@ import (
 // or record key.
 //
 //	r\0<collection>\0<did>\0<rkey>  -> export line (JSON, no newline)
-//	d\0<did>\0<collection>\0<rkey>  -> empty; index for purging a DID
+//	d\0<did>\0<collection>\0<rkey>  -> uint64 sort time; index by DID
+//	t\0<collection>\0<sort time>\0<did>\0<rkey> -> empty; index by time
 //	c\0<collection>                 -> uint64 live record count
 //	a\0<did>                        -> inactive account status
 //	m\0cursor                       -> uint64 last folded source seq
@@ -25,6 +27,7 @@ import (
 const (
 	prefixRecord   = "r\x00"
 	prefixDID      = "d\x00"
+	prefixTime     = "t\x00"
 	prefixCount    = "c\x00"
 	prefixInactive = "a\x00"
 	keyCursor      = "m\x00cursor"
@@ -135,6 +138,44 @@ func didKey(did, collection, rkey string) []byte {
 	return []byte(prefixDID + did + "\x00" + collection + "\x00" + rkey)
 }
 
+func timeKey(collection string, sortTime uint64, did, rkey string) []byte {
+	k := make([]byte, 0, len(prefixTime)+len(collection)+1+8+1+len(did)+1+len(rkey))
+	k = append(k, prefixTime...)
+	k = append(k, collection...)
+	k = append(k, 0)
+	k = binary.BigEndian.AppendUint64(k, sortTime)
+	k = append(k, 0)
+	k = append(k, did...)
+	k = append(k, 0)
+	k = append(k, rkey...)
+	return k
+}
+
+const tidAlphabet = "234567abcdefghijklmnopqrstuvwxyz"
+
+// SortTime is the time a record is ordered by, in microseconds: the
+// creation time encoded in a TID record key, or the time the record was
+// witnessed when the key is not a TID or claims a later time. Backfilled
+// records are all witnessed at once, so the key is the only useful order.
+func SortTime(rkey string, witnessedUS int64) uint64 {
+	witnessed := uint64(max(witnessedUS, 0))
+	if len(rkey) != 13 {
+		return witnessed
+	}
+	var v uint64
+	for i := 0; i < 13; i++ {
+		d := strings.IndexByte(tidAlphabet, rkey[i])
+		if d < 0 || (i == 0 && d > 15) {
+			return witnessed
+		}
+		v = v<<5 | uint64(d)
+	}
+	if t := v >> 10; t > 0 && t <= witnessed {
+		return t
+	}
+	return witnessed
+}
+
 func u64(v uint64) []byte {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, v)
@@ -210,16 +251,42 @@ func (b *Batch) has(key []byte) (bool, error) {
 	return true, closer.Close()
 }
 
-// Put stores the current version of a record. line is its export line.
-func (b *Batch) Put(collection, did, rkey string, line []byte) error {
+// sortTimeOf returns the stored sort time of a record, if it exists.
+func (b *Batch) sortTimeOf(dk []byte) (sortTime uint64, exists bool, err error) {
+	v, closer, err := b.b.Get(dk)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if len(v) == 8 {
+		sortTime = binary.BigEndian.Uint64(v)
+	}
+	return sortTime, true, closer.Close()
+}
+
+// Put stores the current version of a record. line is its export line and
+// witnessedUS the time the source saw this version.
+func (b *Batch) Put(collection, did, rkey string, line []byte, witnessedUS int64) error {
 	dk := didKey(did, collection, rkey)
-	exists, err := b.has(dk)
+	old, exists, err := b.sortTimeOf(dk)
 	if err != nil {
 		return err
 	}
+	sortTime := SortTime(rkey, witnessedUS)
 	if !exists {
 		b.counts[collection]++
-		if err := b.b.Set(dk, nil, nil); err != nil {
+	} else if old != sortTime {
+		if err := b.b.Delete(timeKey(collection, old, did, rkey), nil); err != nil {
+			return err
+		}
+	}
+	if !exists || old != sortTime {
+		if err := b.b.Set(dk, u64(sortTime), nil); err != nil {
+			return err
+		}
+		if err := b.b.Set(timeKey(collection, sortTime, did, rkey), nil, nil); err != nil {
 			return err
 		}
 	}
@@ -228,15 +295,20 @@ func (b *Batch) Put(collection, did, rkey string, line []byte) error {
 
 func (b *Batch) Delete(collection, did, rkey string) error {
 	dk := didKey(did, collection, rkey)
-	exists, err := b.has(dk)
+	sortTime, exists, err := b.sortTimeOf(dk)
 	if err != nil || !exists {
 		return err
 	}
+	return b.remove(collection, did, rkey, sortTime)
+}
+
+func (b *Batch) remove(collection, did, rkey string, sortTime uint64) error {
 	b.counts[collection]--
-	if err := b.b.Delete(dk, nil); err != nil {
-		return err
-	}
-	return b.b.Delete(recordKey(collection, did, rkey), nil)
+	return errors.Join(
+		b.b.Delete(didKey(did, collection, rkey), nil),
+		b.b.Delete(timeKey(collection, sortTime, did, rkey), nil),
+		b.b.Delete(recordKey(collection, did, rkey), nil),
+	)
 }
 
 // PurgeDID removes every record of did (account deletion, repo resync).
@@ -246,7 +318,10 @@ func (b *Batch) PurgeDID(did string) error {
 	if err != nil {
 		return err
 	}
-	type rec struct{ collection, rkey string }
+	type rec struct {
+		collection, rkey string
+		sortTime         uint64
+	}
 	var recs []rec
 	for it.First(); it.Valid(); it.Next() {
 		rest := it.Key()[len(prefix):]
@@ -254,17 +329,17 @@ func (b *Batch) PurgeDID(did string) error {
 		if i < 0 {
 			continue
 		}
-		recs = append(recs, rec{string(rest[:i]), string(rest[i+1:])})
+		r := rec{collection: string(rest[:i]), rkey: string(rest[i+1:])}
+		if v := it.Value(); len(v) == 8 {
+			r.sortTime = binary.BigEndian.Uint64(v)
+		}
+		recs = append(recs, r)
 	}
 	if err := errors.Join(it.Error(), it.Close()); err != nil {
 		return err
 	}
 	for _, r := range recs {
-		b.counts[r.collection]--
-		if err := b.b.Delete(didKey(did, r.collection, r.rkey), nil); err != nil {
-			return err
-		}
-		if err := b.b.Delete(recordKey(r.collection, did, r.rkey), nil); err != nil {
+		if err := b.remove(r.collection, did, r.rkey, r.sortTime); err != nil {
 			return err
 		}
 	}

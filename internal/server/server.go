@@ -55,6 +55,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /export", s.handleExport)
 	mux.HandleFunc("GET /collections", s.handleCollections)
+	mux.HandleFunc("GET /xrpc/tools.atmo.index.getRecord", s.handleGetRecord)
+	mux.HandleFunc("GET /xrpc/tools.atmo.index.listRecords", s.handleListRecords)
 	mux.HandleFunc("GET /alluvium/status", s.handleStatus)
 	mux.HandleFunc("GET /alluvium/health", s.handleHealth)
 	return mux
