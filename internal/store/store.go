@@ -46,10 +46,12 @@ func Open(dir string) (*Store, error) {
 	defer cache.Unref()
 	opts := &pebble.Options{Cache: cache, MemTableSize: 64 << 20}
 	opts.EnsureDefaults()
-	// Snappy (the default) rather than zstd: pebble v1's zstd read path
-	// fails with "decompressed into unexpected buffer" in this build.
+	// Export lines are JSON, which zstd shrinks far better than snappy.
+	// pebble v1's cgo zstd fails on read ("decompressed into unexpected
+	// buffer"), so zstd is only used in pure-Go builds; see compression_*.go.
 	for i := range opts.Levels {
-		opts.Levels[i].BlockSize = 32 << 10
+		opts.Levels[i].Compression = blockCompression
+		opts.Levels[i].BlockSize = 64 << 10
 	}
 	db, err := pebble.Open(dir, opts)
 	if err != nil {

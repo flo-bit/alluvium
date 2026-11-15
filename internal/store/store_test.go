@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -144,5 +145,30 @@ func TestPurgeAndInactive(t *testing.T) {
 	lines, _, _ := export(t, s, "a.b.one", "")
 	if len(lines) != 1 || count(s, "a.b.one") != 1 || count(s, "a.b.two") != 1 {
 		t.Fatalf("after reactivate and purge: %v, counts %v", lines, s.Collections())
+	}
+}
+
+// TestReadBackFromDisk forces rows out of the memtable so the block
+// compression in use is exercised on both write and read.
+func TestReadBackFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	must(t, err)
+	line := []byte(`{"did":"did:plc:alice","kind":"commit","commit":{"operation":"create","collection":"a.b.one","record":{"text":"the same words again and again and again"}}}`)
+	b := s.NewBatch()
+	for i := range 20000 {
+		must(t, b.Put("a.b.one", "did:plc:alice", fmt.Sprintf("%06d", i), line))
+	}
+	must(t, b.Commit(1, 1))
+	must(t, b.Close())
+	must(t, s.db.Flush())
+	must(t, s.Close())
+
+	s, err = Open(dir)
+	must(t, err)
+	defer func() { _ = s.Close() }()
+	lines, _, _ := export(t, s, "a.b.one", "")
+	if len(lines) != 20000 || lines[19999] != string(line) {
+		t.Fatalf("read back %d lines", len(lines))
 	}
 }
