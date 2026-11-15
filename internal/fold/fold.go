@@ -98,7 +98,7 @@ func applyEvent(b *store.Batch, ev *jetstream.Event) error {
 		if err != nil {
 			return err
 		}
-		return b.Put(c.Collection, ev.DID, c.Rkey, line, ev.TimeUS)
+		return b.Put(c.Collection, ev.DID, c.Rkey, line, ev.TimeUS, store.ExtractLinks(map[string]any(c.Record)))
 
 	case ev.Sync != nil:
 		// The repo is being replaced; its current records follow as creates.

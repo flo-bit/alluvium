@@ -32,7 +32,16 @@ const (
 	prefixInactive = "a\x00"
 	keyCursor      = "m\x00cursor"
 	keyTime        = "m\x00time"
+	keyVersion     = "m\x00version"
+
+	// schemaVersion changes whenever the key layout does. The store is
+	// derived from the source, so a mismatch is fixed by refolding.
+	schemaVersion = 3
 )
+
+// ErrSchema reports a store written with a different key layout. Delete
+// the directory; it refolds from the source.
+var ErrSchema = errors.New("store: schema version mismatch")
 
 type Store struct {
 	db *pebble.DB
@@ -75,6 +84,19 @@ func (s *Store) load() error {
 		return err
 	} else {
 		s.cursor = v
+	}
+	version, err := getUint(s.db, keyVersion)
+	if err != nil {
+		return err
+	}
+	switch {
+	case version == schemaVersion:
+	case version == 0 && s.cursor == 0:
+		if err := s.db.Set([]byte(keyVersion), u64(schemaVersion), pebble.Sync); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%w: store has %d, this build writes %d", ErrSchema, version, schemaVersion)
 	}
 	if v, err := getUint(s.db, keyTime); err != nil {
 		return err
@@ -266,15 +288,24 @@ func (b *Batch) sortTimeOf(dk []byte) (sortTime uint64, exists bool, err error) 
 	return sortTime, true, closer.Close()
 }
 
-// Put stores the current version of a record. line is its export line and
-// witnessedUS the time the source saw this version.
-func (b *Batch) Put(collection, did, rkey string, line []byte, witnessedUS int64) error {
+// Put stores the current version of a record. line is its export line,
+// witnessedUS the time the source saw this version, and links its outgoing
+// references (ExtractLinks of the record).
+func (b *Batch) Put(collection, did, rkey string, line []byte, witnessedUS int64, links []Link) error {
 	dk := didKey(did, collection, rkey)
 	old, exists, err := b.sortTimeOf(dk)
 	if err != nil {
 		return err
 	}
 	sortTime := SortTime(rkey, witnessedUS)
+	if exists {
+		if err := b.unlink(collection, did, rkey, old); err != nil {
+			return err
+		}
+	}
+	if err := b.adjustLinks(collection, did, rkey, sortTime, links, +1); err != nil {
+		return err
+	}
 	if !exists {
 		b.counts[collection]++
 	} else if old != sortTime {
@@ -302,7 +333,19 @@ func (b *Batch) Delete(collection, did, rkey string) error {
 	return b.remove(collection, did, rkey, sortTime)
 }
 
+// unlink removes the backlinks of the stored version of a record.
+func (b *Batch) unlink(collection, did, rkey string, sortTime uint64) error {
+	line, err := b.getBytes(recordKey(collection, did, rkey))
+	if err != nil || line == nil {
+		return err
+	}
+	return b.adjustLinks(collection, did, rkey, sortTime, linksOfLine(line), -1)
+}
+
 func (b *Batch) remove(collection, did, rkey string, sortTime uint64) error {
+	if err := b.unlink(collection, did, rkey, sortTime); err != nil {
+		return err
+	}
 	b.counts[collection]--
 	return errors.Join(
 		b.b.Delete(didKey(did, collection, rkey), nil),

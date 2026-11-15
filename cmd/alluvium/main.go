@@ -71,6 +71,14 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	_ = fs.Parse(args)
 
 	st, err := store.Open(*dataDir)
+	if errors.Is(err, store.ErrSchema) {
+		// The store is derived data: drop it and refold from the source.
+		logger.Warn("rebuilding store", "reason", err.Error())
+		if err := os.RemoveAll(*dataDir); err != nil {
+			return err
+		}
+		st, err = store.Open(*dataDir)
+	}
 	if err != nil {
 		return err
 	}

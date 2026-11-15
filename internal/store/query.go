@@ -46,6 +46,9 @@ type ListOptions struct {
 	// After continues from the last row of the previous page.
 	After *Position
 	Limit int
+	// LinkPath and LinkTarget, when set, list only records whose field at
+	// LinkPath holds the AT URI or DID LinkTarget.
+	LinkPath, LinkTarget string
 }
 
 // View is a consistent point-in-time read view.
@@ -111,9 +114,12 @@ func (v *View) List(o ListOptions) (rows []Row, more bool, err error) {
 		return nil, false, nil
 	}
 	var positions []Position
-	if o.DID != "" {
+	switch {
+	case o.LinkTarget != "":
+		positions, err = v.backlinkPositions(o.LinkTarget, o.LinkPath, o)
+	case o.DID != "":
 		positions, err = v.actorPositions(o)
-	} else {
+	default:
 		positions, err = v.timePositions(o)
 	}
 	if err != nil {
@@ -158,19 +164,9 @@ func (v *View) timePositions(o ListOptions) ([]Position, error) {
 	}
 	var out []Position
 	for ; ok && len(out) <= o.Limit; ok = step(it, o.Ascending) {
-		rest := it.Key()[len(prefix):]
-		// <8 byte sort time>\0<did>\0<rkey>
-		if len(rest) < 10 || rest[8] != 0 {
+		p, valid := parsePosition(it.Key()[len(prefix):])
+		if !valid {
 			continue
-		}
-		i := bytes.IndexByte(rest[9:], 0)
-		if i < 0 {
-			continue
-		}
-		p := Position{
-			SortTime: binary.BigEndian.Uint64(rest[:8]),
-			DID:      string(rest[9 : 9+i]),
-			Rkey:     string(rest[9+i+1:]),
 		}
 		if _, hidden := v.inactive[p.DID]; hidden {
 			continue
@@ -178,6 +174,22 @@ func (v *View) timePositions(o ListOptions) ([]Position, error) {
 		out = append(out, p)
 	}
 	return out, it.Error()
+}
+
+// parsePosition decodes "<8 byte sort time>\0<did>\0<rkey>".
+func parsePosition(rest []byte) (Position, bool) {
+	if len(rest) < 10 || rest[8] != 0 {
+		return Position{}, false
+	}
+	i := bytes.IndexByte(rest[9:], 0)
+	if i < 0 {
+		return Position{}, false
+	}
+	return Position{
+		SortTime: binary.BigEndian.Uint64(rest[:8]),
+		DID:      string(rest[9 : 9+i]),
+		Rkey:     string(rest[9+i+1:]),
+	}, true
 }
 
 func step(it *pebble.Iterator, ascending bool) bool {
