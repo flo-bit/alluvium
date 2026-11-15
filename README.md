@@ -40,6 +40,43 @@ retry pass, so a daily run keeps coverage current.
 | `GET /alluvium/status` | Cursor, lag, totals, export usage |
 | `/subscribe`, `/xrpc/network.bsky.jetstream.*`, `/status` | Stock Jetstream v2 |
 
+### Query
+
+Three methods under `/xrpc/tools.atmo.index.`, with no per-app configuration:
+
+| Method | Parameters |
+|---|---|
+| `getRecord` | `uri` |
+| `listRecords` | `collection`, `actor` (DID or handle), `order` (`desc` or `asc`), `limit` (1-200), `cursor` |
+| `getProfile` | `actor` |
+
+Records are ordered by the creation time in their record key, falling back
+to when they were first seen. `getRecord` and `listRecords` also take:
+
+| Parameter | Effect |
+|---|---|
+| `<field>=<value>` | Keep records whose field equals the value (for an array, contains it). Dotted paths reach nested fields. |
+| `<field>Min`, `<field>Max` | Range bounds; numbers, datetimes and strings compare as such. |
+| `backlinks=<collection>:<path>` | Per record, how many records of that collection link to it at that path, and from how many accounts. Up to 10. |
+| `hydrate=<path>` | Attach the record the AT URI at that path points to. Up to 5. |
+| `profiles=true` or `profiles=<collection>,…` | Add each author's handle and profile records. `true` means the Bluesky profile, fetched from the PDS and cached for an hour. |
+
+A filter on an AT URI or DID uses the backlink index. Other filters examine
+candidates in time order, at most 50,000 per request; a response can then
+hold fewer records than `limit`, or none, and still carry a cursor to
+continue from.
+
+Send `Atproto-Accept-Labelers: <did>, <did>;redact` to have those labelers'
+labels attached to records and profiles (labels on the record and on its
+author). `;redact` also drops records that labeler has taken down. A labeler
+named for the first time starts syncing from its first label and is left out
+of responses until it has caught up, which takes hours for a large one;
+`Atproto-Content-Labelers` lists the labelers actually applied.
+
+```sh
+curl 'https://backfill.atmo.tools/xrpc/tools.atmo.index.listRecords?collection=social.grain.gallery&limit=24&backlinks=social.grain.favorite:subject&profiles=true'
+```
+
 ### Export
 
 The response is newline-delimited JSON, compressed with zstd or gzip per
@@ -119,3 +156,6 @@ new backfill.
   malformed CID link) is skipped by the export store and logged.
 - Records of deactivated, suspended or taken-down accounts are hidden, not
   removed, until the account is deleted.
+- Backlink counts include links from accounts a caller's labelers flag.
+- Backlinks from Bluesky records are not indexed.
+- There are no per-caller rate limits yet.

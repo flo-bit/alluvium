@@ -1,6 +1,6 @@
 backfill.atmo.tools {
-	# Export service. Exports compress themselves.
-	@alluvium path /export /collections /alluvium/*
+	# Export and query service. Exports compress themselves.
+	@alluvium path /export /collections /alluvium/* /xrpc/tools.atmo.index.*
 	handle @alluvium {
 		reverse_proxy 127.0.0.1:8090 {
 			flush_interval -1
