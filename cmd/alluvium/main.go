@@ -17,6 +17,8 @@ import (
 
 	"github.com/flo-bit/alluvium/internal/discover"
 	"github.com/flo-bit/alluvium/internal/fold"
+	"github.com/flo-bit/alluvium/internal/identity"
+	"github.com/flo-bit/alluvium/internal/safehttp"
 	"github.com/flo-bit/alluvium/internal/server"
 	"github.com/flo-bit/alluvium/internal/store"
 )
@@ -62,12 +64,30 @@ func splitList(s string) []string {
 	return out
 }
 
+// matchesAny reports whether nsid matches an exact name or "prefix.*".
+func matchesAny(patterns []string, nsid string) bool {
+	for _, p := range patterns {
+		if strings.HasSuffix(p, ".*") {
+			if strings.HasPrefix(nsid, strings.TrimSuffix(p, "*")) {
+				return true
+			}
+		} else if p == nsid {
+			return true
+		}
+	}
+	return false
+}
+
 func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", env("ALLUVIUM_ADDR", "127.0.0.1:8090"), "listen address")
 	dataDir := fs.String("data-dir", env("ALLUVIUM_DATA_DIR", "./data"), "store directory")
 	source := fs.String("jetstream", env("ALLUVIUM_JETSTREAM", "http://127.0.0.1:8080"), "Jetstream v2 host to fold")
 	tokens := fs.String("tokens-file", env("ALLUVIUM_TOKENS_FILE", ""), `file of "name token" lines; when set, exports require a token`)
+	contact := fs.String("contact", env("ALLUVIUM_CONTACT", ""), "contact for the User-Agent on identity and profile lookups")
+	deny := fs.String("deny", env("ALLUVIUM_DENY_COLLECTIONS", "app.bsky.*,chat.bsky.*"), "collections the source does not carry (exact or prefix.*); their profiles are fetched from the PDS")
+	slingshot := fs.String("slingshot", env("ALLUVIUM_SLINGSHOT", "https://slingshot.microcosm.blue"), "identity resolver; empty to resolve directly")
+	plc := fs.String("plc", env("ALLUVIUM_PLC", "https://plc.directory"), "PLC directory")
 	_ = fs.Parse(args)
 
 	st, err := store.Open(*dataDir)
@@ -85,7 +105,23 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	defer func() { _ = st.Close() }()
 
 	folder := &fold.Folder{Host: *source, Store: st, Logger: logger.With("component", "fold")}
+	userAgent := "alluvium/0.1"
+	if *contact != "" {
+		userAgent += " (" + *contact + ")"
+	}
+	// One client for every fetch whose host comes from a DID document or a
+	// caller-supplied handle.
+	fetch := safehttp.NewClient(8 * time.Second)
+	denied := splitList(*deny)
 	srv := &server.Server{
+		Profiles: &server.Profiles{
+			Identity: &identity.Resolver{
+				Slingshot: strings.TrimRight(*slingshot, "/"), PLC: strings.TrimRight(*plc, "/"),
+				UserAgent: userAgent, Client: fetch,
+			},
+			Client: fetch, UserAgent: userAgent,
+			Held: func(collection string) bool { return !matchesAny(denied, collection) },
+		},
 		Store: st, Logger: logger.With("component", "http"), TokensFile: *tokens,
 		FoldStats: func() (uint64, uint64) { return folder.Events(), folder.Errors() },
 	}

@@ -30,6 +30,8 @@ type Server struct {
 	// TokensFile, when set, holds "name token" lines; exports then require
 	// "Authorization: Bearer <token>". Re-read when the file changes.
 	TokensFile string
+	// Profiles resolves handles and profile records; nil disables both.
+	Profiles *Profiles
 	// FoldStats reports the folder's event and error counters.
 	FoldStats func() (events, errors uint64)
 
@@ -57,6 +59,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /collections", s.handleCollections)
 	mux.HandleFunc("GET /xrpc/tools.atmo.index.getRecord", s.handleGetRecord)
 	mux.HandleFunc("GET /xrpc/tools.atmo.index.listRecords", s.handleListRecords)
+	mux.HandleFunc("GET /xrpc/tools.atmo.index.getProfile", s.handleGetProfile)
 	mux.HandleFunc("GET /alluvium/status", s.handleStatus)
 	mux.HandleFunc("GET /alluvium/health", s.handleHealth)
 	return mux

@@ -237,7 +237,15 @@ func (s *Server) handleGetRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "InternalError", "lookup failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, rec)
+	profileCollections, problem := parseProfiles(r.URL.Query().Get("profiles"))
+	if problem != "" {
+		writeError(w, http.StatusBadRequest, "InvalidRequest", problem)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Record
+		Profiles []Profile `json:"profiles,omitempty"`
+	}{rec, s.Profiles.For(r.Context(), view, []string{rec.DID}, profileCollections)})
 }
 
 func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
@@ -267,11 +275,17 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if actor := q.Get("actor"); actor != "" {
-		if !strings.HasPrefix(actor, "did:") {
-			writeError(w, http.StatusBadRequest, "InvalidRequest", "actor must be a DID")
+		did, err := s.resolveActor(r.Context(), actor)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "ActorNotFound", "actor does not resolve")
 			return
 		}
-		opts.DID = actor
+		opts.DID = did
+	}
+	profileCollections, problem := parseProfiles(q.Get("profiles"))
+	if problem != "" {
+		writeError(w, http.StatusBadRequest, "InvalidRequest", problem)
+		return
 	}
 	extra, problem := parseExtras(q)
 	if problem != "" {
@@ -313,8 +327,9 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	// A request examines at most scanBudget candidates; when that runs out
 	// the cursor lets the caller continue, possibly from a short page.
 	out := struct {
-		Records []Record `json:"records"`
-		Cursor  string   `json:"cursor,omitempty"`
+		Records  []Record  `json:"records"`
+		Profiles []Profile `json:"profiles,omitempty"`
+		Cursor   string    `json:"cursor,omitempty"`
 	}{Records: make([]Record, 0, opts.Limit)}
 	want, examined := opts.Limit, 0
 	scan := opts
@@ -364,5 +379,6 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	if more && last != nil {
 		out.Cursor = encodePosition(store.Position{SortTime: last.SortTime, DID: last.DID, Rkey: last.Rkey})
 	}
+	out.Profiles = s.Profiles.For(r.Context(), view, recordDIDs(out.Records), profileCollections)
 	writeJSON(w, http.StatusOK, out)
 }
