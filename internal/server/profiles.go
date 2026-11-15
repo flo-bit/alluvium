@@ -35,6 +35,22 @@ type Profile struct {
 	URI        string          `json:"uri,omitempty"`
 	CID        string          `json:"cid,omitempty"`
 	Value      json.RawMessage `json:"value,omitempty"`
+	// Labels are the labels on the account and on this profile record.
+	Labels []store.Label `json:"labels,omitempty"`
+}
+
+// labelProfiles attaches the accepted labelers' labels to each profile.
+// Profiles are never dropped: a taken-down account still needs to render
+// as such next to content that references it.
+func labelProfiles(view *store.View, profiles []Profile, policy labelPolicy) error {
+	for i := range profiles {
+		labels, _, err := policy.labelsFor(view, profiles[i].URI, profiles[i].DID)
+		if err != nil {
+			return err
+		}
+		profiles[i].Labels = labels
+	}
+	return nil
 }
 
 // Profiles resolves identities and profile records. Collections held in
@@ -250,6 +266,9 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 	view := s.Store.NewView()
 	defer func() { _ = view.Close() }()
 	profiles := s.Profiles.For(r.Context(), view, []string{did}, collections)
+	if err := labelProfiles(view, profiles, s.labelPolicy(w, r)); err != nil {
+		s.Logger.Error("getProfile", "err", err)
+	}
 	handle := ""
 	if len(profiles) > 0 {
 		handle = profiles[0].Handle

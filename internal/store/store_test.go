@@ -375,3 +375,54 @@ func TestBacklinks(t *testing.T) {
 		t.Fatalf("other counts after purge = %s, want 1/1", got)
 	}
 }
+
+func TestLabels(t *testing.T) {
+	s := open(t)
+	const mod, other = "did:plc:mod", "did:plc:other"
+	const post = "at://did:plc:alice/a.b.one/1"
+	must(t, s.AddLabeler(other))
+	must(t, s.ApplyLabels(mod, []Label{
+		{Src: mod, URI: post, Val: "spam", Cts: "2026-01-01T00:00:00Z"},
+		{Src: mod, URI: "did:plc:alice", Val: "!takedown", Cts: "2026-01-01T00:00:00Z"},
+		{Src: mod, URI: post, Val: "old", Cts: "2026-01-01T00:00:00Z", Exp: "2026-01-02T00:00:00Z"},
+		{Src: other, URI: post, Val: "forged", Cts: "2026-01-01T00:00:00Z"}, // wrong stream: ignored
+	}, 7))
+
+	labels := func(subject string, srcs ...string) string {
+		t.Helper()
+		v := s.NewView()
+		defer func() { _ = v.Close() }()
+		got, err := v.Labels(subject, srcs)
+		must(t, err)
+		out := ""
+		for _, l := range got {
+			out += l.Src[len("did:plc:"):] + ":" + l.Val + " "
+		}
+		return out
+	}
+	if got := labels(post, mod, other); got != "mod:spam " {
+		t.Fatalf("post labels = %q", got)
+	}
+	if got := labels("did:plc:alice", mod); got != "mod:!takedown " {
+		t.Fatalf("account labels = %q", got)
+	}
+	if got := labels(post, other); got != "" {
+		t.Fatalf("labels from an unselected labeler leaked: %q", got)
+	}
+
+	// An older label does not undo a newer one; a newer negation removes it.
+	must(t, s.ApplyLabels(mod, []Label{{Src: mod, URI: post, Val: "spam", Cts: "2025-01-01T00:00:00Z", Neg: true}}, 8))
+	if got := labels(post, mod); got != "mod:spam " {
+		t.Fatalf("stale negation applied: %q", got)
+	}
+	must(t, s.ApplyLabels(mod, []Label{{Src: mod, URI: post, Val: "spam", Cts: "2026-02-01T00:00:00Z", Neg: true}}, 9))
+	if got := labels(post, mod); got != "" {
+		t.Fatalf("negation not applied: %q", got)
+	}
+
+	cursors, err := s.Labelers()
+	must(t, err)
+	if cursors[mod] != 9 || cursors[other] != 0 || len(cursors) != 2 {
+		t.Fatalf("labelers = %v", cursors)
+	}
+}

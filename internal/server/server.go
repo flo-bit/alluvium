@@ -30,6 +30,11 @@ type Server struct {
 	// TokensFile, when set, holds "name token" lines; exports then require
 	// "Authorization: Bearer <token>". Re-read when the file changes.
 	TokensFile string
+	// Labels follows labeler services; nil disables labels.
+	Labels Labelers
+	// LabelStatus reports each followed labeler and whether it has
+	// caught up, for the status page.
+	LabelStatus func() map[string]bool
 	// Profiles resolves handles and profile records; nil disables both.
 	Profiles *Profiles
 	// FoldStats reports the folder's event and error counters.
@@ -312,6 +317,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.FoldStats != nil {
 		events, errs = s.FoldStats()
 	}
+	var labelers map[string]bool
+	if s.LabelStatus != nil {
+		labelers = s.LabelStatus()
+	}
 	s.mu.Lock()
 	usage := make(map[string]Usage, len(s.usage))
 	for name, u := range s.usage {
@@ -328,5 +337,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"eventsSinceStart":  events,
 		"sourceErrors":      errs,
 		"exportsSinceStart": usage,
+		"labelers":          labelers,
 	})
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/flo-bit/alluvium/internal/discover"
 	"github.com/flo-bit/alluvium/internal/fold"
 	"github.com/flo-bit/alluvium/internal/identity"
+	"github.com/flo-bit/alluvium/internal/labels"
 	"github.com/flo-bit/alluvium/internal/safehttp"
 	"github.com/flo-bit/alluvium/internal/server"
 	"github.com/flo-bit/alluvium/internal/store"
@@ -88,6 +89,7 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	deny := fs.String("deny", env("ALLUVIUM_DENY_COLLECTIONS", "app.bsky.*,chat.bsky.*"), "collections the source does not carry (exact or prefix.*); their profiles are fetched from the PDS")
 	slingshot := fs.String("slingshot", env("ALLUVIUM_SLINGSHOT", "https://slingshot.microcosm.blue"), "identity resolver; empty to resolve directly")
 	plc := fs.String("plc", env("ALLUVIUM_PLC", "https://plc.directory"), "PLC directory")
+	labelers := fs.String("labelers", env("ALLUVIUM_LABELERS", ""), "comma-separated labeler DIDs to follow from the start; others are added the first time a request names them")
 	_ = fs.Parse(args)
 
 	st, err := store.Open(*dataDir)
@@ -113,7 +115,22 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	// caller-supplied handle.
 	fetch := safehttp.NewClient(8 * time.Second)
 	denied := splitList(*deny)
+	labelManager := &labels.Manager{
+		Store: st, Logger: logger.With("component", "labels"), Client: fetch,
+		PLC: strings.TrimRight(*plc, "/"), UserAgent: userAgent,
+		// Account labels always matter; record labels only for collections
+		// the store holds.
+		Keep: func(subject string) bool {
+			rest, isRecord := strings.CutPrefix(subject, "at://")
+			if !isRecord {
+				return strings.HasPrefix(subject, "did:")
+			}
+			parts := strings.Split(rest, "/")
+			return len(parts) < 2 || !matchesAny(denied, parts[1])
+		},
+	}
 	srv := &server.Server{
+		Labels: labelManager, LabelStatus: labelManager.Status,
 		Profiles: &server.Profiles{
 			Identity: &identity.Resolver{
 				Slingshot: strings.TrimRight(*slingshot, "/"), PLC: strings.TrimRight(*plc, "/"),
@@ -127,8 +144,13 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
 	go func() { errc <- folder.Run(ctx) }()
+	go func() {
+		if err := labelManager.Run(ctx, splitList(*labelers)); !errors.Is(err, context.Canceled) {
+			errc <- err
+		}
+	}()
 	go func() {
 		logger.Info("listening", "addr", *addr)
 		errc <- httpServer.ListenAndServe()

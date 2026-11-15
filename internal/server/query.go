@@ -40,6 +40,9 @@ type Record struct {
 	// Hydrated holds, per requested path, the record that field points
 	// to, or null when it is not in the index.
 	Hydrated map[string]*Record `json:"hydrated,omitempty"`
+	// Labels are the labels on this record and on its author's account
+	// from the labelers the request accepted.
+	Labels []store.Label `json:"labels,omitempty"`
 }
 
 // BacklinkCount counts the records linking to a record from one source.
@@ -52,6 +55,7 @@ type BacklinkCount struct {
 type extras struct {
 	backlinks []backlinkSpec
 	hydrate   []string
+	labels    labelPolicy
 }
 
 type backlinkSpec struct{ raw, collection, path string }
@@ -106,8 +110,18 @@ func fieldAt(value json.RawMessage, path string) (string, bool) {
 	return s, ok
 }
 
-// decorate adds the requested backlink counts and hydrated references.
-func decorate(view *store.View, rec *Record, e extras) error {
+// decorate adds the requested labels, backlink counts and hydrated
+// references. It reports false for a record a redacting labeler took down.
+func decorate(view *store.View, rec *Record, e extras) (bool, error) {
+	labels, redacted, err := e.labels.labelsFor(view, rec.URI, rec.DID)
+	if err != nil || redacted {
+		return false, err
+	}
+	rec.Labels = labels
+	return true, decorateLinks(view, rec, e)
+}
+
+func decorateLinks(view *store.View, rec *Record, e extras) error {
 	if len(e.backlinks) > 0 {
 		rec.Backlinks = make(map[string]BacklinkCount, len(e.backlinks))
 		for _, spec := range e.backlinks {
@@ -137,9 +151,19 @@ func decorate(view *store.View, rec *Record, e extras) error {
 			if row == nil {
 				continue
 			}
-			if hydrated, err := renderRecord(row); err == nil {
-				rec.Hydrated[path] = &hydrated
+			hydrated, err := renderRecord(row)
+			if err != nil {
+				continue
 			}
+			labels, redacted, err := e.labels.labelsFor(view, hydrated.URI, hydrated.DID)
+			if err != nil {
+				return err
+			}
+			if redacted {
+				continue
+			}
+			hydrated.Labels = labels
+			rec.Hydrated[path] = &hydrated
 		}
 	}
 	return nil
@@ -232,9 +256,15 @@ func (s *Server) handleGetRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "InternalError", "record unreadable")
 		return
 	}
-	if err := decorate(view, &rec, extra); err != nil {
+	extra.labels = s.labelPolicy(w, r)
+	visible, err := decorate(view, &rec, extra)
+	if err != nil {
 		s.Logger.Error("getRecord", "err", err)
 		writeError(w, http.StatusInternalServerError, "InternalError", "lookup failed")
+		return
+	}
+	if !visible {
+		writeError(w, http.StatusNotFound, "RecordNotFound", "no such record")
 		return
 	}
 	profileCollections, problem := parseProfiles(r.URL.Query().Get("profiles"))
@@ -242,10 +272,14 @@ func (s *Server) handleGetRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "InvalidRequest", problem)
 		return
 	}
+	profiles := s.Profiles.For(r.Context(), view, []string{rec.DID}, profileCollections)
+	if err := labelProfiles(view, profiles, extra.labels); err != nil {
+		s.Logger.Error("getRecord", "err", err)
+	}
 	writeJSON(w, http.StatusOK, struct {
 		Record
 		Profiles []Profile `json:"profiles,omitempty"`
-	}{rec, s.Profiles.For(r.Context(), view, []string{rec.DID}, profileCollections)})
+	}{rec, profiles})
 }
 
 func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
@@ -320,6 +354,7 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		opts.After = pos
 	}
 
+	extra.labels = s.labelPolicy(w, r)
 	view := s.Store.NewView()
 	defer func() { _ = view.Close() }()
 
@@ -357,10 +392,14 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 			if !matchAll(filters, rec.Value) {
 				continue
 			}
-			if err := decorate(view, &rec, extra); err != nil {
+			visible, err := decorate(view, &rec, extra)
+			if err != nil {
 				s.Logger.Error("listRecords", "err", err)
 				writeError(w, http.StatusInternalServerError, "InternalError", "query failed")
 				return
+			}
+			if !visible {
+				continue
 			}
 			out.Records = append(out.Records, rec)
 			if len(out.Records) == want {
@@ -380,5 +419,8 @@ func (s *Server) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		out.Cursor = encodePosition(store.Position{SortTime: last.SortTime, DID: last.DID, Rkey: last.Rkey})
 	}
 	out.Profiles = s.Profiles.For(r.Context(), view, recordDIDs(out.Records), profileCollections)
+	if err := labelProfiles(view, out.Profiles, extra.labels); err != nil {
+		s.Logger.Error("listRecords", "err", err)
+	}
 	writeJSON(w, http.StatusOK, out)
 }
