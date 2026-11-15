@@ -1,0 +1,24 @@
+[Unit]
+Description=Alluvium Jetstream (filtered Atmosphere archive)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=alluvium
+Group=alluvium
+EnvironmentFile=/etc/alluvium/jetstream.env
+ExecStart=/opt/alluvium/bin/jetstream serve
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+MemoryHigh=2300M
+MemoryMax=2600M
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/alluvium
+
+[Install]
+WantedBy=multi-user.target

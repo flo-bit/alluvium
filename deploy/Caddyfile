@@ -1,0 +1,24 @@
+backfill.atmo.tools {
+	encode zstd gzip {
+		# Exports compress themselves.
+		match {
+			not path /export
+		}
+	}
+
+	# Export service.
+	@alluvium path /export /collections /alluvium/*
+	handle @alluvium {
+		reverse_proxy 127.0.0.1:8090 {
+			flush_interval -1
+		}
+	}
+
+	# Everything else is the stock Jetstream v2 API: /subscribe,
+	# /xrpc/network.bsky.jetstream.*, /status.
+	handle {
+		reverse_proxy 127.0.0.1:8080 {
+			flush_interval -1
+		}
+	}
+}

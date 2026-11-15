@@ -1,0 +1,23 @@
+[Unit]
+Description=Alluvium export service
+After=alluvium-jetstream.service
+Wants=alluvium-jetstream.service
+
+[Service]
+User=alluvium
+Group=alluvium
+EnvironmentFile=/etc/alluvium/alluvium.env
+ExecStart=/opt/alluvium/bin/alluvium serve
+Restart=always
+RestartSec=5
+MemoryHigh=800M
+MemoryMax=1G
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/alluvium
+
+[Install]
+WantedBy=multi-user.target

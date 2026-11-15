@@ -1,0 +1,18 @@
+[Unit]
+Description=Alluvium repo discovery
+After=network-online.target alluvium-jetstream.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=alluvium
+Group=alluvium
+EnvironmentFile=/etc/alluvium/alluvium.env
+ExecStart=/opt/alluvium/bin/alluvium discover
+TimeoutStartSec=6h
+MemoryMax=600M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/alluvium
