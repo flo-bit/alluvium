@@ -508,19 +508,22 @@ type Export struct {
 	// Cursor is the source seq the view is consistent with: replaying the
 	// source from Cursor (inclusive) on top of the export converges.
 	Cursor uint64
+	// TimeUS is when the source witnessed the event at Cursor. Replaying
+	// any Jetstream instance from a little before it also converges.
+	TimeUS int64
 }
 
 func (s *Store) NewExport() (*Export, error) {
 	// Hold the lock across the snapshot so cursor and data agree.
 	s.mu.RLock()
 	snap := s.db.NewSnapshot()
-	cursor := s.cursor
+	cursor, timeUS := s.cursor, s.timeUS
 	inactive := make(map[string]struct{}, len(s.inactive))
 	for did := range s.inactive {
 		inactive[did] = struct{}{}
 	}
 	s.mu.RUnlock()
-	return &Export{snap: snap, inactive: inactive, Cursor: cursor}, nil
+	return &Export{snap: snap, inactive: inactive, Cursor: cursor, TimeUS: timeUS}, nil
 }
 
 func (e *Export) Close() error { return e.snap.Close() }

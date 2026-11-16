@@ -142,7 +142,7 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 		},
 	}
 	srv := &server.Server{
-		Labels: labelManager, LabelStatus: labelManager.Status,
+		Labels: labelManager, LabelStatus: labelManager.Status, Excludes: denied,
 		Profiles: &server.Profiles{
 			Identity: &identity.Resolver{
 				Slingshot: strings.TrimRight(*slingshot, "/"), PLC: strings.TrimRight(*plc, "/"),

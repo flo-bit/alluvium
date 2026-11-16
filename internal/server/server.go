@@ -30,6 +30,10 @@ type Server struct {
 	// TokensFile, when set, holds "name token" lines; exports then require
 	// "Authorization: Bearer <token>". Re-read when the file changes.
 	TokensFile string
+	// Excludes lists the collections the source does not carry (exact
+	// names or "prefix.*"), advertised so clients do not mistake an
+	// absent collection for an empty one.
+	Excludes []string
 	// Labels follows labeler services; nil disables labels.
 	Labels Labelers
 	// LabelStatus reports each followed labeler and whether it has
@@ -150,9 +154,11 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // handleExport streams every live record of the requested collections as
 // newline-delimited Jetstream commit events, then one end line:
 //
-//	{"kind":"end","cursor":N,"records":M}
+//	{"kind":"end","cursor":N,"time_us":T,"records":M}
 //
-// N is a Jetstream cursor: subscribe from it to continue live. A response
+// N is a cursor on this host's Jetstream: subscribe from it to continue
+// live. T is when that event was witnessed; any Jetstream instance can be
+// followed from a little before T instead. A response
 // without the end line was cut short; resume with ?after=<Alluvium-Resume
 // value of the last line received> and keep the first response's cursor.
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +207,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("Content-Type", "application/x-ndjson")
 	h.Set("Alluvium-Cursor", fmt.Sprint(exp.Cursor))
+	h.Set("Alluvium-Time-Us", fmt.Sprint(exp.TimeUS))
 	h.Set("Cache-Control", "no-store")
 	h.Set("Vary", "Accept-Encoding")
 
@@ -252,7 +259,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if streamErr == nil {
-		_, streamErr = fmt.Fprintf(bw, `{"kind":"end","cursor":%d,"records":%d}`+"\n", exp.Cursor, records)
+		_, streamErr = fmt.Fprintf(bw, `{"kind":"end","cursor":%d,"time_us":%d,"records":%d}`+"\n", exp.Cursor, exp.TimeUS, records)
 	}
 	if err := bw.Flush(); streamErr == nil {
 		streamErr = err
@@ -282,9 +289,15 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCollections(w http.ResponseWriter, _ *http.Request) {
-	cursor, _ := s.Store.Cursor()
+	cursor, timeUS := s.Store.Cursor()
+	excludes := s.Excludes
+	if excludes == nil {
+		excludes = []string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"cursor":      cursor,
+		"time_us":     timeUS,
+		"excludes":    excludes,
 		"collections": s.Store.Collections(),
 	})
 }

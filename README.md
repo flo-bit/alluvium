@@ -91,12 +91,18 @@ stream:
 The last line ends the export:
 
 ```json
-{"kind":"end","cursor":3688002,"records":139398}
+{"kind":"end","cursor":3688002,"time_us":1794705518038027,"records":139398}
 ```
 
 Then subscribe to Jetstream on the same host with that cursor (also sent up
 front in the `Alluvium-Cursor` header). The live stream replays from the
 cursor inclusively; applying its events on top of the export is idempotent.
+
+To follow a different Jetstream instance, such as the official one, use
+`time_us` (header `Alluvium-Time-Us`) as a timestamp cursor, minus a few
+minutes of margin: sequence numbers are per instance, time is not.
+`GET /collections` returns the same two values for the current head, plus
+`excludes`, the collections this host does not carry.
 
 A response without the end line was cut short. To resume, request with
 `resume=1` so each line carries a `resume` token, then repeat the request
