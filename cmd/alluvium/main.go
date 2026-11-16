@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -99,6 +100,7 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	plc := fs.String("plc", env("ALLUVIUM_PLC", "https://plc.directory"), "PLC directory")
 	cacheMB := fs.Int64("cache-mb", envInt("ALLUVIUM_CACHE_MB", 256), "store block cache size in MiB")
 	downloads := fs.Int("download-concurrency", int(envInt("ALLUVIUM_DOWNLOAD_CONCURRENCY", 2)), "parallel archive downloads while catching up; each holds a segment (about 270 MB) in memory")
+	debugAddr := fs.String("debug-addr", env("ALLUVIUM_DEBUG_ADDR", ""), "listen address for net/http/pprof; keep it on localhost")
 	labelers := fs.String("labelers", env("ALLUVIUM_LABELERS", ""), "comma-separated labeler DIDs to follow from the start; others are added the first time a request names them")
 	_ = fs.Parse(args)
 
@@ -154,6 +156,14 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
+	if *debugAddr != "" {
+		go func() {
+			// http.DefaultServeMux carries the pprof handlers.
+			if err := http.ListenAndServe(*debugAddr, nil); err != nil {
+				logger.Warn("debug listener", "err", err)
+			}
+		}()
+	}
 	errc := make(chan error, 3)
 	go func() { errc <- folder.Run(ctx) }()
 	go func() {
