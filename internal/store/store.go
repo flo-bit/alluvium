@@ -88,6 +88,11 @@ func Open(dir string, cacheBytes int64) (*Store, error) {
 	// descend. A big base level leaves two hops, memtable to base to bottom,
 	// instead of four or five.
 	opts.LBaseMaxBytes = 2 << 30
+	// Do not stop writes when the top level backs up. With the big base
+	// level, a compaction into it can wait a long time behind one out of
+	// it, and a fold stalled for over an hour on that. A deep top level only
+	// makes reads slower until compaction catches up.
+	opts.L0StopWritesThreshold = 1000
 	// Folding itself uses under one core; let compaction use the rest
 	// instead of stalling writes behind a single compaction thread.
 	opts.MaxConcurrentCompactions = func() int { return max(2, runtime.GOMAXPROCS(0)) }
