@@ -39,6 +39,7 @@ retry pass, so a daily run keeps coverage current.
 |---|---|
 | `GET /export?collection=A&collection=B` | Current records of up to 100 collections |
 | `GET /collections` | Every collection with its record count |
+| `GET /alluvium/head` | Where the store is: cursor, its time, and the collections it excludes |
 | `GET /alluvium/health` | 200 while within five minutes of the firehose |
 | `GET /alluvium/status` | Cursor, lag, totals, export usage |
 | `/subscribe`, `/xrpc/network.bsky.jetstream.*`, `/status` | Stock Jetstream v2 |

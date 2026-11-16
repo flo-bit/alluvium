@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /xrpc/tools.atmo.index.getRecord", s.handleGetRecord)
 	mux.HandleFunc("GET /xrpc/tools.atmo.index.listRecords", s.handleListRecords)
 	mux.HandleFunc("GET /xrpc/tools.atmo.index.getProfile", s.handleGetProfile)
+	mux.HandleFunc("GET /alluvium/head", s.handleHead)
 	mux.HandleFunc("GET /alluvium/status", s.handleStatus)
 	mux.HandleFunc("GET /alluvium/health", s.handleHealth)
 	return mux
@@ -288,18 +289,26 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		"complete", streamErr == nil, "err", streamErr)
 }
 
-func (s *Server) handleCollections(w http.ResponseWriter, _ *http.Request) {
+// head describes how far the store has folded and what it leaves out.
+func (s *Server) head() map[string]any {
 	cursor, timeUS := s.Store.Cursor()
 	excludes := s.Excludes
 	if excludes == nil {
 		excludes = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"cursor":      cursor,
-		"time_us":     timeUS,
-		"excludes":    excludes,
-		"collections": s.Store.Collections(),
-	})
+	return map[string]any{"cursor": cursor, "time_us": timeUS, "excludes": excludes}
+}
+
+// handleHead is the cheap way to ask where the store is, for clients about
+// to start an export. /collections carries the same fields plus every count.
+func (s *Server) handleHead(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.head())
+}
+
+func (s *Server) handleCollections(w http.ResponseWriter, _ *http.Request) {
+	body := s.head()
+	body["collections"] = s.Store.Collections()
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) lagSeconds() float64 {

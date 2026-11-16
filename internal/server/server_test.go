@@ -266,3 +266,27 @@ func TestLabels(t *testing.T) {
 		t.Fatalf("labelled getRecord: %d", status)
 	}
 }
+
+func TestHead(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, path := range []string{"/alluvium/head", "/collections"} {
+		resp, err := srv.Client().Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Cursor      uint64            `json:"cursor"`
+			TimeUS      int64             `json:"time_us"`
+			Excludes    []string          `json:"excludes"`
+			Collections []json.RawMessage `json:"collections"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if err != nil || body.Cursor != 1 || body.TimeUS != 1000 || body.Excludes == nil {
+			t.Fatalf("%s: %+v %v", path, body, err)
+		}
+		if (path == "/collections") != (len(body.Collections) > 0) {
+			t.Fatalf("%s: %d collections", path, len(body.Collections))
+		}
+	}
+}
