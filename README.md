@@ -148,6 +148,20 @@ and run `deploy/install.sh ./jetstream ./alluvium` as root.
 The ingest filter is permanent for what it drops: widening it later means a
 new backfill.
 
+### Sizing
+
+Measured on 2 shared vCPUs and 4 GB, which is enough for steady state and
+tight for the initial load:
+
+- Give each process a `GOMEMLIMIT` with a few hundred MB of headroom over
+  its live heap. Too little and it spends most of its CPU in garbage
+  collection; Jetstream then falls behind the firehose and buffers it.
+- Run the bootstrap and the first fold one after the other. For the fold,
+  temporarily raise the export service to about 1.25 GiB and lower Jetstream
+  to about 1.65 GiB.
+- The bootstrap of 300,000 repos took about 22 hours; folding the resulting
+  archive runs at roughly 8,000 events per second.
+
 ## Known limits
 
 - Coverage depends on the collection directories. A repo with old records
