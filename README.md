@@ -18,7 +18,10 @@ Two processes on one machine:
   small additions: an ingest filter that drops `app.bsky.*` and `chat.bsky.*`,
   backfill from a repo list instead of the whole network, and a configurable
   User-Agent. It verifies and archives the firehose, backfills listed repos
-  from their PDS, and serves the stock Jetstream v2 API.
+  from their PDS, and serves the stock Jetstream v2 API. Every full-repo
+  download goes through one disk-backed path: repos over 64 MB are parsed
+  from a temporary file, and a repo whose commit chain breaks is queued for
+  re-download there instead of being resynced in memory.
 - **`alluvium serve`** is a Jetstream client on localhost. It folds events
   into a current-state store keyed by collection (deletes applied, deleted
   accounts purged, inactive accounts hidden) and serves exports from it.
