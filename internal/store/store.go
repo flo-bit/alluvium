@@ -73,17 +73,21 @@ func Open(dir string, cacheBytes int64) (*Store, error) {
 	// a block; without them every lookup decompresses one.
 	for i := range opts.Levels {
 		// Data is rewritten each time it moves down a level. Compress the
-		// upper levels cheaply and spend zstd only on the two bottom ones,
-		// which hold nearly all of it; zstd everywhere made compaction the
+		// upper levels cheaply and spend zstd only on the bottom one, which
+		// holds nearly all of it; zstd everywhere made compaction the
 		// bottleneck of a bulk fold.
 		opts.Levels[i].Compression = pebble.SnappyCompression
-		if i >= len(opts.Levels)-2 {
+		if i == len(opts.Levels)-1 {
 			opts.Levels[i].Compression = blockCompression
 		}
 		opts.Levels[i].BlockSize = 32 << 10
 		opts.Levels[i].FilterPolicy = bloom.FilterPolicy(10)
 		opts.Levels[i].FilterType = pebble.TableFilter
 	}
+	// Records are large, so the cost of the store is rewriting them as they
+	// descend. A big base level leaves two hops, memtable to base to bottom,
+	// instead of four or five.
+	opts.LBaseMaxBytes = 2 << 30
 	// Folding itself uses under one core; let compaction use the rest
 	// instead of stalling writes behind a single compaction thread.
 	opts.MaxConcurrentCompactions = func() int { return max(2, runtime.GOMAXPROCS(0)) }
