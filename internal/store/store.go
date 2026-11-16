@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -71,11 +72,21 @@ func Open(dir string, cacheBytes int64) (*Store, error) {
 	// new? is this link new?). Bloom filters answer those without reading
 	// a block; without them every lookup decompresses one.
 	for i := range opts.Levels {
-		opts.Levels[i].Compression = blockCompression
+		// Data is rewritten each time it moves down a level. Compress the
+		// upper levels cheaply and spend zstd only on the two bottom ones,
+		// which hold nearly all of it; zstd everywhere made compaction the
+		// bottleneck of a bulk fold.
+		opts.Levels[i].Compression = pebble.SnappyCompression
+		if i >= len(opts.Levels)-2 {
+			opts.Levels[i].Compression = blockCompression
+		}
 		opts.Levels[i].BlockSize = 32 << 10
 		opts.Levels[i].FilterPolicy = bloom.FilterPolicy(10)
 		opts.Levels[i].FilterType = pebble.TableFilter
 	}
+	// Folding itself uses under one core; let compaction use the rest
+	// instead of stalling writes behind a single compaction thread.
+	opts.MaxConcurrentCompactions = func() int { return max(2, runtime.GOMAXPROCS(0)) }
 	db, err := pebble.Open(dir, opts)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", dir, err)
