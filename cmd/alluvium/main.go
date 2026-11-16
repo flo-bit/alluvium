@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -55,6 +56,13 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+func envInt(key string, fallback int64) int64 {
+	if n, err := strconv.ParseInt(os.Getenv(key), 10, 64); err == nil {
+		return n
+	}
+	return fallback
+}
+
 func splitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
@@ -89,24 +97,26 @@ func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	deny := fs.String("deny", env("ALLUVIUM_DENY_COLLECTIONS", "app.bsky.*,chat.bsky.*"), "collections the source does not carry (exact or prefix.*); their profiles are fetched from the PDS")
 	slingshot := fs.String("slingshot", env("ALLUVIUM_SLINGSHOT", "https://slingshot.microcosm.blue"), "identity resolver; empty to resolve directly")
 	plc := fs.String("plc", env("ALLUVIUM_PLC", "https://plc.directory"), "PLC directory")
+	cacheMB := fs.Int64("cache-mb", envInt("ALLUVIUM_CACHE_MB", 256), "store block cache size in MiB")
+	downloads := fs.Int("download-concurrency", int(envInt("ALLUVIUM_DOWNLOAD_CONCURRENCY", 2)), "parallel archive downloads while catching up; each holds a segment (about 270 MB) in memory")
 	labelers := fs.String("labelers", env("ALLUVIUM_LABELERS", ""), "comma-separated labeler DIDs to follow from the start; others are added the first time a request names them")
 	_ = fs.Parse(args)
 
-	st, err := store.Open(*dataDir)
+	st, err := store.Open(*dataDir, *cacheMB<<20)
 	if errors.Is(err, store.ErrSchema) {
 		// The store is derived data: drop it and refold from the source.
 		logger.Warn("rebuilding store", "reason", err.Error())
 		if err := os.RemoveAll(*dataDir); err != nil {
 			return err
 		}
-		st, err = store.Open(*dataDir)
+		st, err = store.Open(*dataDir, *cacheMB<<20)
 	}
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
 
-	folder := &fold.Folder{Host: *source, Store: st, Logger: logger.With("component", "fold")}
+	folder := &fold.Folder{Host: *source, Store: st, Logger: logger.With("component", "fold"), DownloadConcurrency: *downloads}
 	userAgent := "alluvium/0.1"
 	if *contact != "" {
 		userAgent += " (" + *contact + ")"

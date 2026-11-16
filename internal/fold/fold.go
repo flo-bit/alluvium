@@ -19,6 +19,9 @@ type Folder struct {
 	Host   string
 	Store  *store.Store
 	Logger *slog.Logger
+	// DownloadConcurrency bounds parallel archive downloads during
+	// catch-up; zero uses the client default (at least 4).
+	DownloadConcurrency int
 
 	events atomic.Uint64
 	errs   atomic.Uint64
@@ -39,6 +42,7 @@ func (f *Folder) Run(ctx context.Context) error {
 		jetstream.WithAfterSeq(cursor),
 		jetstream.WithBatchSize(4096),
 		jetstream.WithLogger(f.Logger),
+		jetstream.WithDownloadConcurrency(f.DownloadConcurrency),
 	)
 	if err != nil {
 		return fmt.Errorf("fold: subscribe %s: %w", f.Host, err)

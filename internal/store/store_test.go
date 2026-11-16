@@ -8,7 +8,7 @@ import (
 
 func open(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(t.TempDir())
+	s, err := Open(t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestFoldAndExport(t *testing.T) {
 
 func TestPurgeAndInactive(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir)
+	s, err := Open(dir, 0)
 	must(t, err)
 
 	b := s.NewBatch()
@@ -125,7 +125,7 @@ func TestPurgeAndInactive(t *testing.T) {
 
 	// State survives a restart.
 	must(t, s.Close())
-	s, err = Open(dir)
+	s, err = Open(dir, 0)
 	must(t, err)
 	defer func() { _ = s.Close() }()
 	if seq, _ := s.Cursor(); seq != 2 {
@@ -153,7 +153,7 @@ func TestPurgeAndInactive(t *testing.T) {
 // compression in use is exercised on both write and read.
 func TestReadBackFromDisk(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir)
+	s, err := Open(dir, 0)
 	must(t, err)
 	line := []byte(`{"did":"did:plc:alice","kind":"commit","commit":{"operation":"create","collection":"a.b.one","record":{"text":"the same words again and again and again"}}}`)
 	b := s.NewBatch()
@@ -165,7 +165,7 @@ func TestReadBackFromDisk(t *testing.T) {
 	must(t, s.db.Flush())
 	must(t, s.Close())
 
-	s, err = Open(dir)
+	s, err = Open(dir, 0)
 	must(t, err)
 	defer func() { _ = s.Close() }()
 	lines, _, _ := export(t, s, "a.b.one", "")

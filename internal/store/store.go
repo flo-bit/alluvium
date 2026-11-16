@@ -53,8 +53,13 @@ type Store struct {
 	timeUS   int64
 }
 
-func Open(dir string) (*Store, error) {
-	cache := pebble.NewCache(256 << 20)
+// Open opens the store in dir with a block cache of cacheBytes (256 MiB
+// when zero).
+func Open(dir string, cacheBytes int64) (*Store, error) {
+	if cacheBytes <= 0 {
+		cacheBytes = 256 << 20
+	}
+	cache := pebble.NewCache(cacheBytes)
 	defer cache.Unref()
 	opts := &pebble.Options{Cache: cache, MemTableSize: 64 << 20}
 	opts.EnsureDefaults()

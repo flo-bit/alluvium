@@ -34,7 +34,7 @@ func line(did, collection, rkey, record string) []byte {
 // pointing at them; a photo the item references.
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	st, err := store.Open(t.TempDir())
+	st, err := store.Open(t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
