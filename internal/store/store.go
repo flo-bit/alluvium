@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/bloom"
 )
 
 // Key layout. 0x00 separates components; it cannot appear in an NSID, DID
@@ -66,9 +67,14 @@ func Open(dir string, cacheBytes int64) (*Store, error) {
 	// Export lines are JSON, which zstd shrinks far better than snappy.
 	// pebble v1's cgo zstd fails on read ("decompressed into unexpected
 	// buffer"), so zstd is only used in pure-Go builds; see compression_*.go.
+	// Folding looks up keys that mostly do not exist yet (is this record
+	// new? is this link new?). Bloom filters answer those without reading
+	// a block; without them every lookup decompresses one.
 	for i := range opts.Levels {
 		opts.Levels[i].Compression = blockCompression
-		opts.Levels[i].BlockSize = 64 << 10
+		opts.Levels[i].BlockSize = 32 << 10
+		opts.Levels[i].FilterPolicy = bloom.FilterPolicy(10)
+		opts.Levels[i].FilterType = pebble.TableFilter
 	}
 	db, err := pebble.Open(dir, opts)
 	if err != nil {
