@@ -1,52 +1,40 @@
-// Package server is alluvium's HTTP API: collection exports and status.
+// Package server is alluvium's HTTP API: collection exports served from
+// the current snapshot, and its status.
 package server
 
 import (
 	"bufio"
-	"compress/gzip"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
-
-	"github.com/flo-bit/alluvium/internal/store"
+	"github.com/flo-bit/alluvium/internal/build"
+	"github.com/flo-bit/alluvium/internal/snapshot"
 )
 
-const maxExportCollections = 100
-
 type Server struct {
-	Store  *store.Store
+	// Root is the snapshots directory. Each request is served from the
+	// snapshot Root/current points to when it arrives.
+	Root   string
 	Logger *slog.Logger
 	// TokensFile, when set, holds "name token" lines; exports then require
 	// "Authorization: Bearer <token>". Re-read when the file changes.
 	TokensFile string
-	// Excludes lists the collections the source does not carry (exact
-	// names or "prefix.*"), advertised so clients do not mistake an
-	// absent collection for an empty one.
-	Excludes []string
-	// Labels follows labeler services; nil disables labels.
-	Labels Labelers
-	// LabelStatus reports each followed labeler and whether it has
-	// caught up, for the status page.
-	LabelStatus func() map[string]bool
-	// Profiles resolves handles and profile records; nil disables both.
-	Profiles *Profiles
-	// FoldStats reports the folder's event and error counters.
-	FoldStats func() (events, errors uint64)
+	// MaxAge is how old the snapshot's last event may be before the
+	// service reports itself unhealthy. Zero means three hours.
+	MaxAge time.Duration
 
 	started time.Time
 
 	mu       sync.Mutex
+	snap     *snapshot.Snapshot
 	tokens   map[string]string // token -> name
 	tokensAt time.Time
 	usage    map[string]*Usage
@@ -63,12 +51,12 @@ type Usage struct {
 func (s *Server) Handler() http.Handler {
 	s.started = time.Now()
 	s.usage = map[string]*Usage{}
+	if s.MaxAge <= 0 {
+		s.MaxAge = 3 * time.Hour
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /export", s.handleExport)
 	mux.HandleFunc("GET /collections", s.handleCollections)
-	mux.HandleFunc("GET /xrpc/tools.atmo.index.getRecord", s.handleGetRecord)
-	mux.HandleFunc("GET /xrpc/tools.atmo.index.listRecords", s.handleListRecords)
-	mux.HandleFunc("GET /xrpc/tools.atmo.index.getProfile", s.handleGetProfile)
 	mux.HandleFunc("GET /alluvium/head", s.handleHead)
 	mux.HandleFunc("GET /alluvium/status", s.handleStatus)
 	mux.HandleFunc("GET /alluvium/health", s.handleHealth)
@@ -83,6 +71,37 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, name, msg string) {
 	writeJSON(w, status, map[string]string{"error": name, "message": msg})
+}
+
+// current returns the published snapshot, reopening it when a build has
+// published a new one.
+func (s *Server) current() (*snapshot.Snapshot, error) {
+	id, err := snapshot.CurrentID(s.Root)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.snap == nil || s.snap.ID != id {
+		snap, err := snapshot.Open(filepath.Join(s.Root, id))
+		if err != nil {
+			return nil, err
+		}
+		s.snap = snap
+	}
+	return s.snap, nil
+}
+
+// serving is current for handlers: ok=false means there is no snapshot
+// and the response is written.
+func (s *Server) serving(w http.ResponseWriter) (*snapshot.Snapshot, bool) {
+	snap, err := s.current()
+	if err != nil {
+		s.Logger.Warn("no snapshot to serve", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "NoSnapshot", "no snapshot has been built yet")
+		return nil, false
+	}
+	return snap, true
 }
 
 // caller authenticates the request. ok=false means it was rejected and the
@@ -141,207 +160,80 @@ func (s *Server) loadTokens() (map[string]string, error) {
 	return tokens, nil
 }
 
-type countingWriter struct {
-	w io.Writer
-	n uint64
+// head describes the snapshot being served.
+func head(snap *snapshot.Snapshot) map[string]any {
+	m := snap.Manifest
+	return map[string]any{
+		"cursor": m.Cursor, "time_us": m.TimeUS, "excludes": m.Excludes,
+		"snapshot": snap.ID, "built_at": m.BuiltAt,
+	}
 }
 
-func (c *countingWriter) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	c.n += uint64(n)
-	return n, err
-}
-
-// handleExport streams every live record of the requested collections as
-// newline-delimited Jetstream commit events, then one end line:
-//
-//	{"kind":"end","cursor":N,"time_us":T,"records":M}
-//
-// N is a cursor on this host's Jetstream: subscribe from it to continue
-// live. T is when that event was witnessed; any Jetstream instance can be
-// followed from a little before T instead. A response
-// without the end line was cut short; resume with ?after=<Alluvium-Resume
-// value of the last line received> and keep the first response's cursor.
-func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	name, ok := s.caller(w, r)
-	if !ok {
-		return
-	}
-	q := r.URL.Query()
-	collections := q["collection"]
-	if len(collections) == 0 {
-		writeError(w, http.StatusBadRequest, "InvalidRequest", "at least one collection is required")
-		return
-	}
-	if len(collections) > maxExportCollections {
-		writeError(w, http.StatusBadRequest, "InvalidRequest", fmt.Sprintf("at most %d collections per request", maxExportCollections))
-		return
-	}
-	sort.Strings(collections)
-	for i, c := range collections {
-		if c == "" || strings.ContainsAny(c, "\x00*") || (i > 0 && c == collections[i-1]) {
-			writeError(w, http.StatusBadRequest, "InvalidRequest", "collections must be distinct exact NSIDs")
-			return
-		}
-	}
-
-	// A resume token names the last line received: its collection and key.
-	afterCollection, afterKey := "", ""
-	if after := q.Get("after"); after != "" {
-		raw, err := base64.RawURLEncoding.DecodeString(after)
-		parts := strings.SplitN(string(raw), "\x00", 2)
-		if err != nil || len(parts) != 2 {
-			writeError(w, http.StatusBadRequest, "InvalidRequest", "after is not a resume token")
-			return
-		}
-		afterCollection, afterKey = parts[0], parts[1]
-	}
-
-	exp, err := s.Store.NewExport()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "InternalError", "export unavailable")
-		return
-	}
-	defer func() { _ = exp.Close() }()
-
-	start := time.Now()
-	h := w.Header()
-	h.Set("Content-Type", "application/x-ndjson")
-	h.Set("Alluvium-Cursor", fmt.Sprint(exp.Cursor))
-	h.Set("Alluvium-Time-Us", fmt.Sprint(exp.TimeUS))
-	h.Set("Cache-Control", "no-store")
-	h.Set("Vary", "Accept-Encoding")
-
-	counted := &countingWriter{w: w}
-	var out io.Writer = counted
-	var closeEnc func() error
-	switch accept := r.Header.Get("Accept-Encoding"); {
-	case strings.Contains(accept, "zstd"):
-		h.Set("Content-Encoding", "zstd")
-		enc, _ := zstd.NewWriter(counted, zstd.WithEncoderLevel(zstd.SpeedDefault))
-		out, closeEnc = enc, enc.Close
-	case strings.Contains(accept, "gzip"):
-		h.Set("Content-Encoding", "gzip")
-		enc, _ := gzip.NewWriterLevel(counted, gzip.BestSpeed)
-		out, closeEnc = enc, enc.Close
-	}
-	bw := bufio.NewWriterSize(out, 256<<10)
-
-	withTokens := q.Get("resume") == "1"
-	var records uint64
-	var streamErr error
-	for _, c := range collections {
-		if c < afterCollection {
-			continue
-		}
-		key := ""
-		if c == afterCollection {
-			key = afterKey
-		}
-		streamErr = exp.Collection(c, key, func(token string, line []byte) error {
-			if err := r.Context().Err(); err != nil {
-				return err
-			}
-			if withTokens {
-				// Splice the resume token into the line: {"resume":"…",<rest>
-				if _, err := fmt.Fprintf(bw, `{"resume":%q,`, base64.RawURLEncoding.EncodeToString([]byte(c+"\x00"+token))); err != nil {
-					return err
-				}
-				line = line[1:]
-			}
-			if _, err := bw.Write(line); err != nil {
-				return err
-			}
-			records++
-			return bw.WriteByte('\n')
-		})
-		if streamErr != nil {
-			break
-		}
-	}
-	if streamErr == nil {
-		_, streamErr = fmt.Fprintf(bw, `{"kind":"end","cursor":%d,"time_us":%d,"records":%d}`+"\n", exp.Cursor, exp.TimeUS, records)
-	}
-	if err := bw.Flush(); streamErr == nil {
-		streamErr = err
-	}
-	if closeEnc != nil {
-		if err := closeEnc(); streamErr == nil {
-			streamErr = err
-		}
-	}
-
-	s.mu.Lock()
-	u := s.usage[name]
-	if u == nil {
-		u = &Usage{}
-		s.usage[name] = u
-	}
-	u.Exports++
-	u.Records += records
-	u.Bytes += counted.n
-	u.Last = time.Now()
-	s.mu.Unlock()
-
-	s.Logger.Info("export",
-		"caller", name, "collections", collections, "records", records,
-		"bytes", counted.n, "duration", time.Since(start).String(),
-		"complete", streamErr == nil, "err", streamErr)
-}
-
-// head describes how far the store has folded and what it leaves out.
-func (s *Server) head() map[string]any {
-	cursor, timeUS := s.Store.Cursor()
-	excludes := s.Excludes
-	if excludes == nil {
-		excludes = []string{}
-	}
-	return map[string]any{"cursor": cursor, "time_us": timeUS, "excludes": excludes}
-}
-
-// handleHead is the cheap way to ask where the store is, for clients about
-// to start an export. /collections carries the same fields plus every count.
+// handleHead is the cheap way to ask where the snapshot is, for clients
+// about to start an export. /collections carries the same fields plus
+// every count.
 func (s *Server) handleHead(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.head())
+	if snap, ok := s.serving(w); ok {
+		writeJSON(w, http.StatusOK, head(snap))
+	}
 }
 
 func (s *Server) handleCollections(w http.ResponseWriter, _ *http.Request) {
-	body := s.head()
-	body["collections"] = s.Store.Collections()
+	snap, ok := s.serving(w)
+	if !ok {
+		return
+	}
+	type count struct {
+		NSID    string `json:"nsid"`
+		Records uint64 `json:"records"`
+	}
+	counts := []count{}
+	for _, c := range snap.Manifest.Collections {
+		if c.Records > 0 {
+			counts = append(counts, count{c.NSID, c.Records})
+		}
+	}
+	// Largest first; the manifest's NSID order breaks ties.
+	sort.SliceStable(counts, func(i, j int) bool { return counts[i].Records > counts[j].Records })
+	body := head(snap)
+	body["collections"] = counts
 	writeJSON(w, http.StatusOK, body)
 }
 
-func (s *Server) lagSeconds() float64 {
-	_, timeUS := s.Store.Cursor()
-	if timeUS == 0 {
-		return -1
-	}
-	return time.Since(time.UnixMicro(timeUS)).Seconds()
-}
-
-// handleHealth is 200 while the store is within five minutes of the source.
+// handleHealth is 200 while the snapshot's last event is younger than
+// MaxAge. Age is measured from when the source witnessed that event, not
+// from when the build ran, so it grows when builds fail and also when the
+// source stops receiving events.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	lag := s.lagSeconds()
+	snap, ok := s.serving(w)
+	if !ok {
+		return
+	}
+	age := time.Since(time.UnixMicro(snap.Manifest.TimeUS))
 	status := http.StatusOK
-	if lag < 0 || lag > 300 {
+	if age > s.MaxAge {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, map[string]any{"ok": status == http.StatusOK, "lagSeconds": lag})
+	writeJSON(w, status, map[string]any{"ok": status == http.StatusOK, "age_seconds": age.Seconds(), "snapshot": snap.ID})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.caller(w, r); !ok {
 		return
 	}
-	cursor, timeUS := s.Store.Cursor()
-	records, collections := s.Store.Totals()
-	var events, errs uint64
-	if s.FoldStats != nil {
-		events, errs = s.FoldStats()
+	snap, ok := s.serving(w)
+	if !ok {
+		return
 	}
-	var labelers map[string]bool
-	if s.LabelStatus != nil {
-		labelers = s.LabelStatus()
+	var records uint64
+	var bytes int64
+	for _, c := range snap.Manifest.Collections {
+		records += c.Records
+		bytes += c.Bytes
+	}
+	lastBuild, err := build.ReadReport(s.Root)
+	if err != nil {
+		s.Logger.Warn("build report unreadable", "err", err)
 	}
 	s.mu.Lock()
 	usage := make(map[string]Usage, len(s.usage))
@@ -349,16 +241,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		usage[name] = *u
 	}
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"uptimeSeconds":     time.Since(s.started).Seconds(),
-		"cursor":            cursor,
-		"lastEventTime":     time.UnixMicro(timeUS).UTC().Format(time.RFC3339),
-		"lagSeconds":        s.lagSeconds(),
-		"records":           records,
-		"collections":       collections,
-		"eventsSinceStart":  events,
-		"sourceErrors":      errs,
-		"exportsSinceStart": usage,
-		"labelers":          labelers,
-	})
+
+	body := head(snap)
+	body["age_seconds"] = time.Since(time.UnixMicro(snap.Manifest.TimeUS)).Seconds()
+	body["records"] = records
+	body["bytes"] = bytes
+	body["collections"] = len(snap.Manifest.Collections)
+	body["last_build"] = lastBuild
+	body["uptime_seconds"] = time.Since(s.started).Seconds()
+	body["exports"] = usage
+	writeJSON(w, http.StatusOK, body)
 }

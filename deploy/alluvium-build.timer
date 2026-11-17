@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly Alluvium snapshot build
+
+# A build that is still running when the timer fires is not started again.
+[Timer]
+OnCalendar=*:07
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,5 +1,6 @@
-// Command alluvium serves fast per-collection exports of Atmosphere records
-// folded from a Jetstream v2 instance, and builds that instance's repo list.
+// Command alluvium serves fast per-collection exports of Atmosphere
+// records. It builds snapshots of the current records from a Jetstream v2
+// instance, serves exports from them, and builds that instance's repo list.
 package main
 
 import (
@@ -12,24 +13,19 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/flo-bit/alluvium/internal/build"
 	"github.com/flo-bit/alluvium/internal/discover"
-	"github.com/flo-bit/alluvium/internal/fold"
-	"github.com/flo-bit/alluvium/internal/identity"
-	"github.com/flo-bit/alluvium/internal/labels"
-	"github.com/flo-bit/alluvium/internal/safehttp"
 	"github.com/flo-bit/alluvium/internal/server"
-	"github.com/flo-bit/alluvium/internal/store"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: alluvium <serve|discover> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: alluvium <serve|build|discover> [flags]")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -39,6 +35,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = runServe(ctx, logger, os.Args[2:])
+	case "build":
+		err = runBuild(ctx, logger, os.Args[2:])
 	case "discover":
 		err = runDiscover(ctx, logger, os.Args[2:])
 	default:
@@ -57,9 +55,9 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func envInt(key string, fallback int64) int64 {
-	if n, err := strconv.ParseInt(os.Getenv(key), 10, 64); err == nil {
-		return n
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(key)); err == nil {
+		return d
 	}
 	return fallback
 }
@@ -74,114 +72,74 @@ func splitList(s string) []string {
 	return out
 }
 
-// matchesAny reports whether nsid matches an exact name or "prefix.*".
-func matchesAny(patterns []string, nsid string) bool {
-	for _, p := range patterns {
-		if strings.HasSuffix(p, ".*") {
-			if strings.HasPrefix(nsid, strings.TrimSuffix(p, "*")) {
-				return true
-			}
-		} else if p == nsid {
-			return true
-		}
-	}
-	return false
-}
-
 func runServe(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", env("ALLUVIUM_ADDR", "127.0.0.1:8090"), "listen address")
-	dataDir := fs.String("data-dir", env("ALLUVIUM_DATA_DIR", "./data"), "store directory")
-	source := fs.String("jetstream", env("ALLUVIUM_JETSTREAM", "http://127.0.0.1:8080"), "Jetstream v2 host to fold")
+	snapshots := fs.String("snapshots", env("ALLUVIUM_SNAPSHOTS", "./snapshots"), "snapshots directory, written by alluvium build")
 	tokens := fs.String("tokens-file", env("ALLUVIUM_TOKENS_FILE", ""), `file of "name token" lines; when set, exports require a token`)
-	contact := fs.String("contact", env("ALLUVIUM_CONTACT", ""), "contact for the User-Agent on identity and profile lookups")
-	deny := fs.String("deny", env("ALLUVIUM_DENY_COLLECTIONS", "app.bsky.*,chat.bsky.*"), "collections the source does not carry (exact or prefix.*); their profiles are fetched from the PDS")
-	slingshot := fs.String("slingshot", env("ALLUVIUM_SLINGSHOT", "https://slingshot.microcosm.blue"), "identity resolver; empty to resolve directly")
-	plc := fs.String("plc", env("ALLUVIUM_PLC", "https://plc.directory"), "PLC directory")
-	cacheMB := fs.Int64("cache-mb", envInt("ALLUVIUM_CACHE_MB", 256), "store block cache size in MiB")
-	downloads := fs.Int("download-concurrency", int(envInt("ALLUVIUM_DOWNLOAD_CONCURRENCY", 2)), "parallel archive downloads while catching up; each holds a segment (about 270 MB) in memory")
+	maxAge := fs.Duration("max-age", envDuration("ALLUVIUM_MAX_AGE", 3*time.Hour), "age of the snapshot's last event beyond which /alluvium/health fails")
 	debugAddr := fs.String("debug-addr", env("ALLUVIUM_DEBUG_ADDR", ""), "listen address for net/http/pprof; keep it on localhost")
-	labelers := fs.String("labelers", env("ALLUVIUM_LABELERS", ""), "comma-separated labeler DIDs to follow from the start; others are added the first time a request names them")
 	_ = fs.Parse(args)
 
-	st, err := store.Open(*dataDir, *cacheMB<<20)
-	if errors.Is(err, store.ErrSchema) {
-		// The store is derived data: drop it and refold from the source.
-		logger.Warn("rebuilding store", "reason", err.Error())
-		if err := os.RemoveAll(*dataDir); err != nil {
-			return err
-		}
-		st, err = store.Open(*dataDir, *cacheMB<<20)
-	}
-	if err != nil {
-		return err
-	}
-	defer func() { _ = st.Close() }()
-
-	folder := &fold.Folder{Host: *source, Store: st, Logger: logger.With("component", "fold"), DownloadConcurrency: *downloads}
-	userAgent := "alluvium/0.1"
-	if *contact != "" {
-		userAgent += " (" + *contact + ")"
-	}
-	// One client for every fetch whose host comes from a DID document or a
-	// caller-supplied handle.
-	fetch := safehttp.NewClient(8 * time.Second)
-	denied := splitList(*deny)
-	labelManager := &labels.Manager{
-		Store: st, Logger: logger.With("component", "labels"), Client: fetch,
-		PLC: strings.TrimRight(*plc, "/"), UserAgent: userAgent,
-		// Account labels always matter; record labels only for collections
-		// the store holds.
-		Keep: func(subject string) bool {
-			rest, isRecord := strings.CutPrefix(subject, "at://")
-			if !isRecord {
-				return strings.HasPrefix(subject, "did:")
-			}
-			parts := strings.Split(rest, "/")
-			return len(parts) < 2 || !matchesAny(denied, parts[1])
-		},
-	}
-	srv := &server.Server{
-		Labels: labelManager, LabelStatus: labelManager.Status, Excludes: denied,
-		Profiles: &server.Profiles{
-			Identity: &identity.Resolver{
-				Slingshot: strings.TrimRight(*slingshot, "/"), PLC: strings.TrimRight(*plc, "/"),
-				UserAgent: userAgent, Client: fetch,
-			},
-			Client: fetch, UserAgent: userAgent,
-			Held: func(collection string) bool { return !matchesAny(denied, collection) },
-		},
-		Store: st, Logger: logger.With("component", "http"), TokensFile: *tokens,
-		FoldStats: func() (uint64, uint64) { return folder.Events(), folder.Errors() },
-	}
+	srv := &server.Server{Root: *snapshots, Logger: logger.With("component", "http"), TokensFile: *tokens, MaxAge: *maxAge}
 	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
-	if *debugAddr != "" {
-		go func() {
-			// http.DefaultServeMux carries the pprof handlers.
-			if err := http.ListenAndServe(*debugAddr, nil); err != nil {
-				logger.Warn("debug listener", "err", err)
-			}
-		}()
-	}
-	errc := make(chan error, 3)
-	go func() { errc <- folder.Run(ctx) }()
+	debug(*debugAddr, logger)
+	errc := make(chan error, 1)
 	go func() {
-		if err := labelManager.Run(ctx, splitList(*labelers)); !errors.Is(err, context.Canceled) {
-			errc <- err
-		}
-	}()
-	go func() {
-		logger.Info("listening", "addr", *addr)
+		logger.Info("listening", "addr", *addr, "snapshots", *snapshots)
 		errc <- httpServer.ListenAndServe()
 	}()
 
-	err = <-errc
+	var err error
+	select {
+	case err = <-errc:
+	case <-ctx.Done():
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
+	}
+	return err
+}
+
+// debug serves net/http/pprof on addr, if set.
+func debug(addr string, logger *slog.Logger) {
+	if addr == "" {
+		return
+	}
+	go func() {
+		// http.DefaultServeMux carries the pprof handlers.
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			logger.Warn("debug listener", "err", err)
+		}
+	}()
+}
+
+func runBuild(ctx context.Context, logger *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("build", flag.ExitOnError)
+	snapshots := fs.String("snapshots", env("ALLUVIUM_SNAPSHOTS", "./snapshots"), "snapshots directory")
+	source := fs.String("jetstream", env("ALLUVIUM_JETSTREAM", "http://127.0.0.1:8080"), "Jetstream v2 host to read events from")
+	through := fs.Uint64("through", 0, "last sequence number to include; by default every event witnessed before the build started")
+	deny := fs.String("deny", env("ALLUVIUM_DENY_COLLECTIONS", "app.bsky.*,chat.bsky.*"), "collections the source does not carry (exact or prefix.*), published so clients know")
+	sortMB := fs.Int("sort-memory-mb", 128, "events held in memory before they are spilled to disk, in MiB")
+	downloads := fs.Int("download-concurrency", 1, "parallel archive downloads; each holds a segment (about 270 MB) in memory")
+	idle := fs.Duration("idle-timeout", 5*time.Minute, "build from what was read when the source delivers nothing for this long")
+	debugAddr := fs.String("debug-addr", env("ALLUVIUM_BUILD_DEBUG_ADDR", ""), "listen address for net/http/pprof; keep it on localhost")
+	_ = fs.Parse(args)
+	debug(*debugAddr, logger)
+
+	logger = logger.With("component", "build")
+	report, err := build.Run(ctx, build.Config{
+		Root:   *snapshots,
+		Source: build.Jetstream(*source, *downloads, logger), Through: *through,
+		Excludes: splitList(*deny), SortMemory: *sortMB << 20, IdleTimeout: *idle,
+		Logger: logger,
+	})
+	if report != nil {
+		logger.Info("build finished", "report", report)
 	}
 	return err
 }

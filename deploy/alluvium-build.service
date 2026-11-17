@@ -1,0 +1,26 @@
+[Unit]
+Description=Alluvium snapshot build
+After=alluvium-jetstream.service
+Wants=alluvium-jetstream.service
+
+[Service]
+Type=oneshot
+User=alluvium
+Group=alluvium
+EnvironmentFile=/etc/alluvium/alluvium.env
+ExecStart=/opt/alluvium/bin/alluvium build
+# The first build reads the whole archive.
+TimeoutStartSec=12h
+# Jetstream must keep up with the firehose while a build runs: the build
+# gets what is left of memory, CPU and disk time.
+Environment=GOMEMLIMIT=1100MiB
+MemoryHigh=1400M
+MemoryMax=1600M
+CPUWeight=20
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/alluvium/snapshots

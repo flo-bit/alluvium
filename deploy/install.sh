@@ -12,7 +12,7 @@ alluvium_bin=${2:?path to the alluvium binary}
 here=$(cd "$(dirname "$0")" && pwd)
 
 id alluvium >/dev/null 2>&1 || useradd --system --home /var/lib/alluvium --shell /usr/sbin/nologin alluvium
-install -d -o alluvium -g alluvium /var/lib/alluvium /var/lib/alluvium/jetstream /var/lib/alluvium/store /var/lib/alluvium/spill
+install -d -o alluvium -g alluvium /var/lib/alluvium /var/lib/alluvium/jetstream /var/lib/alluvium/snapshots /var/lib/alluvium/spill
 install -d /opt/alluvium/bin /etc/alluvium
 install -m 0755 "$jetstream_bin" /opt/alluvium/bin/jetstream.new
 install -m 0755 "$alluvium_bin" /opt/alluvium/bin/alluvium.new
@@ -26,6 +26,8 @@ done
 [ -e /var/lib/alluvium/repos.txt ] || install -o alluvium -g alluvium -m 0644 /dev/null /var/lib/alluvium/repos.txt
 
 install -m 0644 "$here"/alluvium-jetstream.service "$here"/alluvium.service \
+	"$here"/alluvium-build.service "$here"/alluvium-build.timer \
 	"$here"/alluvium-discover.service "$here"/alluvium-discover.timer /etc/systemd/system/
 systemctl daemon-reload
-echo "installed. Next: systemctl enable --now alluvium-jetstream alluvium alluvium-discover.timer"
+echo "installed. Next: systemctl enable --now alluvium-jetstream alluvium alluvium-build.timer alluvium-discover.timer"
+echo "The first snapshot: systemctl start --no-block alluvium-build"
