@@ -235,9 +235,19 @@ new backfill.
 
 ### Sizing
 
-The numbers below are from an M-series Mac building from the production
-archive (45.6M events, 45.2M records in 32,900 collections on 2026-11-16);
-the box has not run a build yet.
+On the production box (Hetzner CX23: 2 shared vCPUs, 4 GB, 2026-11-17,
+46.5M events, 45.6M records in 33,100 collections):
+
+| | |
+|---|---|
+| Build from scratch | 48 min (38 reading the local archive), 65 CPU-minutes |
+| Its memory | 1.3 GB peak, and 630 MB of swap; Jetstream at `GOMEMLIMIT=1650MiB` meanwhile |
+| Its disk | 11 GB before, 24 GB at peak |
+| Catch-up build after 15 hours (1.56M events) | 7 min, 1.3 GB peak |
+| Disk with two snapshots | 26 GB of 38 |
+
+The rest is from an M-series Mac building from the same archive the day
+before:
 
 | | |
 |---|---|
