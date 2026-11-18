@@ -104,7 +104,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(collections)
 	for i, c := range collections {
-		if c == "" || strings.ContainsAny(c, "\x00*") || (i > 0 && c == collections[i-1]) {
+		if !isNSID(c) || (i > 0 && c == collections[i-1]) {
 			writeError(w, http.StatusBadRequest, "InvalidRequest", "collections must be distinct exact NSIDs")
 			return
 		}
@@ -230,4 +230,31 @@ func sendLines(w io.Writer, parts []*part, end []byte) error {
 	}
 	_, err = w.Write(end)
 	return err
+}
+
+// isNSID reports whether s has the form of an NSID: at least three segments
+// of letters, digits and hyphens, separated by dots. Nothing else can name
+// a collection, so anything else is a mistake in the request, not an empty
+// collection.
+func isNSID(s string) bool {
+	if len(s) > 317 {
+		return false
+	}
+	segments, length := 1, 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '.':
+			if length == 0 {
+				return false
+			}
+			segments, length = segments+1, 0
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-':
+			if length++; length > 63 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return length > 0 && segments >= 3
 }

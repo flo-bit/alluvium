@@ -40,7 +40,7 @@ func put(did, collection, rkey string) jetstream.Event {
 	}}
 }
 
-// fixture is a network of three collections. x.post is large and includes
+// fixture is a network of three collections. x.app.post is large and includes
 // DIDs that sort differently as URIs than as keys; did:plc:gone is hidden.
 func fixture() []jetstream.Event {
 	var events []jetstream.Event
@@ -50,11 +50,11 @@ func fixture() []jetstream.Event {
 	}
 	for _, did := range dids {
 		for i := 0; i < 12; i++ {
-			events = append(events, put(did, "x.post", fmt.Sprintf("r%02d", i)))
+			events = append(events, put(did, "x.app.post", fmt.Sprintf("r%02d", i)))
 		}
-		events = append(events, put(did, "x.profile", "self"))
+		events = append(events, put(did, "x.app.profile", "self"))
 	}
-	events = append(events, put("did:plc:000", "x.like", "1"), put("did:plc:gone", "x.like", "1"))
+	events = append(events, put("did:plc:000", "x.app.like", "1"), put("did:plc:gone", "x.app.like", "1"))
 	events = append(events, jetstream.Event{DID: "did:plc:gone", Kind: jetstream.KindAccount, Account: &jetstream.Account{Status: "takendown"}})
 	return events
 }
@@ -175,7 +175,7 @@ func TestExport(t *testing.T) {
 	publish(t, root, events, time.Minute)
 	srv := newTestServer(t, &Server{Root: root})
 
-	all := url.Values{"collection": {"x.profile", "x.post", "x.like", "x.absent"}}
+	all := url.Values{"collection": {"x.app.profile", "x.app.post", "x.app.like", "x.app.absent"}}
 	lines, header := export(t, srv, "zstd", all)
 	uris, end := records(t, lines)
 
@@ -228,14 +228,14 @@ func TestExport(t *testing.T) {
 		after string
 		first string // the record the response starts with
 	}{
-		{"at://did:plc:000/x.post/r05x", "at://did:plc:000/x.post/r06"},   // a record that is gone
-		{"at://did:web:a/x.post/zzz", "at://did:web:a%3A8080/x.post/r00"}, // not at://did:web:a.example
-		{"at://did:plc:000/x.like/0", "at://did:plc:000/x.like/1"},        // before a collection's first
-		{"at://did:plc:zzz/x.like/1", "at://did:plc:000/x.post/r00"},      // past a collection's last
-		{"at://did:plc:000/x.other/1", "at://did:plc:000/x.post/r00"},     // a collection not requested
-		{"at://did:plc:000/x.zzz/1", ""},                                  // past everything
-		{uris[len(uris)-1], ""},                                           // the very last record
-		{"at://did:plc:gone/x.post/r03", "at://did:web:a/x.post/r00"},     // a record now hidden
+		{"at://did:plc:000/x.app.post/r05x", "at://did:plc:000/x.app.post/r06"},   // a record that is gone
+		{"at://did:web:a/x.app.post/zzz", "at://did:web:a%3A8080/x.app.post/r00"}, // not at://did:web:a.example
+		{"at://did:plc:000/x.app.like/0", "at://did:plc:000/x.app.like/1"},        // before a collection's first
+		{"at://did:plc:zzz/x.app.like/1", "at://did:plc:000/x.app.post/r00"},      // past a collection's last
+		{"at://did:plc:000/x.app.other/1", "at://did:plc:000/x.app.post/r00"},     // a collection not requested
+		{"at://did:plc:000/x.app.zzz/1", ""},                                      // past everything
+		{uris[len(uris)-1], ""},                                                   // the very last record
+		{"at://did:plc:gone/x.app.post/r03", "at://did:web:a/x.app.post/r00"},     // a record now hidden
 	} {
 		got, _ := export(t, srv, "zstd", url.Values{"collection": all["collection"], "after": {tc.after}})
 		rest, _ := records(t, got)
@@ -244,7 +244,7 @@ func TestExport(t *testing.T) {
 		}
 	}
 
-	for _, bad := range []string{"", "collection=x.*", "collection=x.post&collection=x.post", "collection=x.post&after=nonsense", "collection=x.post&after=at://did:plc:000/x.post"} {
+	for _, bad := range []string{"", "collection=x.*", "collection=bad+nsid", "collection=x.post", "collection=a..b.c", "collection=a.b.c.", "collection=a.b.c%2Fd", "collection=x.app.post&collection=x.app.post", "collection=x.app.post&after=nonsense", "collection=x.app.post&after=at://did:plc:000/x.app.post"} {
 		res, err := http.Get(srv.URL + "/export?" + bad)
 		if err != nil {
 			t.Fatal(err)
@@ -276,7 +276,7 @@ func getJSON(t *testing.T, url string, wantStatus int) map[string]any {
 func TestHeadAndCollections(t *testing.T) {
 	root := t.TempDir()
 	srv := newTestServer(t, &Server{Root: root})
-	for _, path := range []string{"/alluvium/head", "/collections", "/alluvium/health", "/alluvium/status", "/export?collection=x.post"} {
+	for _, path := range []string{"/alluvium/head", "/collections", "/alluvium/health", "/alluvium/status", "/export?collection=x.app.post"} {
 		if body := getJSON(t, srv.URL+path, http.StatusServiceUnavailable); body["error"] != "NoSnapshot" {
 			t.Errorf("%s before the first snapshot: %v", path, body)
 		}
@@ -294,7 +294,7 @@ func TestHeadAndCollections(t *testing.T) {
 		t.Errorf("collections: %v", body)
 	}
 	// Largest first, counting served records only.
-	if got, want := fmt.Sprint(body["collections"]), "[map[nsid:x.post records:528] map[nsid:x.profile records:44] map[nsid:x.like records:1]]"; got != want {
+	if got, want := fmt.Sprint(body["collections"]), "[map[nsid:x.app.post records:528] map[nsid:x.app.profile records:44] map[nsid:x.app.like records:1]]"; got != want {
 		t.Errorf("collections\n got %s\nwant %s", got, want)
 	}
 	status := getJSON(t, srv.URL+"/alluvium/status", 200)
@@ -303,14 +303,14 @@ func TestHeadAndCollections(t *testing.T) {
 	}
 
 	// A new snapshot is served as soon as it is published.
-	events = append(events, put("did:plc:new", "x.like", "1"))
+	events = append(events, put("did:plc:new", "x.app.like", "1"))
 	publish(t, root, events, time.Minute)
 	if head := getJSON(t, srv.URL+"/alluvium/head", 200); head["snapshot"] != fmt.Sprint(len(events)) {
 		t.Errorf("head after a build: %v", head)
 	}
-	lines, _ := export(t, srv, "zstd", url.Values{"collection": {"x.like"}})
+	lines, _ := export(t, srv, "zstd", url.Values{"collection": {"x.app.like"}})
 	if uris, _ := records(t, lines); len(uris) != 2 {
-		t.Errorf("x.like after a build: %v", uris)
+		t.Errorf("x.app.like after a build: %v", uris)
 	}
 }
 
@@ -322,7 +322,7 @@ func TestHealth(t *testing.T) {
 		t.Errorf("fresh: %v", body)
 	}
 	// The age is that of the last event, however recently the build ran.
-	publish(t, root, append(fixture(), put("did:plc:new", "x.like", "1")), 2*time.Hour)
+	publish(t, root, append(fixture(), put("did:plc:new", "x.app.like", "1")), 2*time.Hour)
 	if body := getJSON(t, srv.URL+"/alluvium/health", http.StatusServiceUnavailable); body["ok"] != false {
 		t.Errorf("stale: %v", body)
 	}
@@ -350,7 +350,7 @@ func TestTokens(t *testing.T) {
 		return res.StatusCode
 	}
 	for path, open := range map[string]bool{
-		"/export?collection=x.like": false, "/alluvium/status": false,
+		"/export?collection=x.app.like": false, "/alluvium/status": false,
 		"/collections": true, "/alluvium/head": true, "/alluvium/health": true,
 	} {
 		want := http.StatusUnauthorized
