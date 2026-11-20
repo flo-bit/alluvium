@@ -1,4 +1,4 @@
-backfill.atmo.tools {
+backfill.example.com {
 	# Export service. Exports are already compressed.
 	@alluvium path /export /collections /alluvium/*
 	handle @alluvium {
