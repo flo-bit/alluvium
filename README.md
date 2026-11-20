@@ -10,7 +10,7 @@ curl --compressed 'https://backfill.atmo.tools/export?collection=community.lexic
 ```
 
 This is a prototype: the API may change, and the public instance is one
-small box.
+small box. No uptime guarantees.
 
 ## How it works
 
